@@ -20,10 +20,9 @@ jobs:
         with:
           python-version: '3.10'  # Python 3.10 버전 사용
 
-      - name: Install dependencies
+      - name: Install pyinstaller
         run: |
           pip install pyinstaller  # pyinstaller 설치
-          pip install -r requirements.txt  # 프로젝트에 필요한 라이브러리 설치 (필요한 경우)
 
       - name: Build EXE using PyInstaller
         run: pyinstaller --onefile --name Prompt-Classifier main.py  # main.py를 기준으로 EXE 빌드, 이름을 Prompt-Classifier.exe로 지정
