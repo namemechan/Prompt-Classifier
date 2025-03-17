@@ -1,0 +1,28 @@
+name: Build and Release EXE
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install pyinstaller
+
+      - name: Build EXE
+        run: pyinstaller --onefile --name my_program main.py
+
+      - name: Upload EXE as Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/my_program.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
