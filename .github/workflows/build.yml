@@ -1,0 +1,36 @@
+name: Build and Release EXE
+
+on:
+  push:
+    branches:
+      - main  # main 브랜치에 푸시될 때마다 실행
+    tags:
+      - 'v*'  # 태그가 푸시될 때도 실행 (버전 릴리스 시)
+
+jobs:
+  build:
+    runs-on: windows-latest  # Windows 환경에서 실행
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3  # 레포지토리의 코드를 체크아웃
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'  # Python 3.10 버전 사용
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller  # pyinstaller 설치
+          pip install -r requirements.txt  # 프로젝트에 필요한 라이브러리 설치 (필요한 경우)
+
+      - name: Build EXE using PyInstaller
+        run: pyinstaller --onefile --name Prompt-Classifier main.py  # main.py를 기준으로 EXE 빌드, 이름을 Prompt-Classifier.exe로 지정
+
+      - name: Upload EXE to GitHub Releases
+        uses: softprops/action-gh-release@v1  # GitHub Releases에 EXE 파일 업로드
+        with:
+          files: dist/Prompt-Classifier.exe  # 빌드된 EXE 파일 경로
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub Token
