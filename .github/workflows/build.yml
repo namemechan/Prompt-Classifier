@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main  # main 브랜치에 푸시될 때마다 실행
-    tags:
-      - 'v*'  # 태그가 푸시될 때도 실행 (버전 릴리스 시)
 
 jobs:
   build:
