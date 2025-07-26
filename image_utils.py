@@ -18,7 +18,12 @@ def read_info_from_image(image_path: str) -> str:
             if prompt_info:
                 return prompt_info
 
-            # 방법 2: EXIF 데이터에서 프롬프트 정보 추출 (JPEG, WEBP 등)
+            # 방법 2: ComfyUI PNG 메타데이터 읽기 (prompt 항목)
+            comfyui_prompt = _extract_comfyui_prompt(png_info)
+            if comfyui_prompt:
+                return comfyui_prompt
+
+            # 방법 3: EXIF 데이터에서 프롬프트 정보 추출 (JPEG, WEBP 등)
             if img.format in ["JPEG", "WEBP"]:
                 try:
                     # piexif를 사용하여 EXIF 데이터 로드
@@ -54,6 +59,50 @@ def read_info_from_image(image_path: str) -> str:
         print(f"이미지 읽기 오류: {str(e)}")
         return ""
 
+
+def _extract_comfyui_prompt(image_info: dict) -> Optional[str]:
+    try:
+        prompt_json_str = image_info.get("prompt")
+        if not prompt_json_str:
+            return None
+
+        prompt_data = None
+        if isinstance(prompt_json_str, str):
+            try:
+                prompt_data = json.loads(prompt_json_str)
+            except json.JSONDecodeError as e:
+                print(f"ComfyUI JSON 디코딩 오류: {e}") # 디버깅용
+                return None
+        elif isinstance(prompt_json_str, dict):
+            prompt_data = prompt_json_str
+        else:
+            print(f"ComfyUI 프롬프트 데이터 타입 오류: {type(prompt_json_str)}") # 디버깅용
+            return None
+
+        if not isinstance(prompt_data, dict):
+            print(f"ComfyUI 파싱 후 프롬프트 데이터가 딕셔너리가 아님: {type(prompt_data)}") # 디버깅용
+            return None
+
+        found_prompts = []
+
+        # 워크플로우의 노드들을 순회
+        for node_id, node_data in prompt_data.items():
+            class_type = node_data.get("class_type")
+            inputs = node_data.get("inputs")
+
+            # CLIPTextEncode 노드를 찾아 'text' 입력 추출
+            if class_type == "CLIPTextEncode" and inputs and "text" in inputs:
+                text = inputs["text"]
+                if isinstance(text, str):
+                    found_prompts.append(text)
+
+        if found_prompts:
+            return "\n".join(found_prompts)
+
+    except Exception as e: # 예상치 못한 다른 오류를 잡기 위함
+        print(f"ComfyUI 프롬프트 추출 중 예상치 못한 오류: {e}") # 디버깅용
+        return None
+    return None
 
 def read_info_from_image_stealth(image: Image.Image) -> Optional[str]:
     """

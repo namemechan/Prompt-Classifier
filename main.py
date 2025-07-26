@@ -348,7 +348,11 @@ class ImageClassifierApp(QMainWindow):
             settings = self.settings_manager.create_settings_from_ui(
                 self.source_dir,
                 self.rename_check.isChecked(),
-                prompt_levels
+                prompt_levels,
+                self.full_tracking_check.isChecked(),
+                self.full_tracking_prompt_input.text(),
+                self.custom_dest_check.isChecked(),
+                self.custom_dest_path_input.text()
             )
             
             # 프리셋으로 저장
@@ -374,6 +378,20 @@ class ImageClassifierApp(QMainWindow):
         self.source_dir = preset.get("source_directory", "")
         self.dir_path_label.setText(self.source_dir if self.source_dir else "디렉토리가 선택되지 않았습니다")
         self.rename_check.setChecked(preset.get("rename_images", False))
+        
+        # 전체추적 설정
+        full_tracking_enabled = preset.get("full_tracking_enabled", False)
+        full_tracking_prompt = preset.get("full_tracking_prompt", "")
+        self.full_tracking_check.setChecked(full_tracking_enabled)
+        self.full_tracking_prompt_input.setText(full_tracking_prompt)
+        self._toggle_full_tracking_input(full_tracking_enabled) # UI 상태 업데이트
+        
+        # 사용자 지정 대상 폴더 설정
+        custom_dest_enabled = preset.get("custom_dest_enabled", False)
+        custom_dest_path = preset.get("custom_dest_path", "")
+        self.custom_dest_check.setChecked(custom_dest_enabled)
+        self.custom_dest_path_input.setText(custom_dest_path)
+        self._toggle_custom_dest_input(custom_dest_enabled) # UI 상태 업데이트
         
         # 프롬프트 레벨 설정
         prompt_levels = preset.get("prompt_levels", [])
