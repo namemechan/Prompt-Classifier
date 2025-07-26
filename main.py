@@ -529,6 +529,9 @@ class ImageClassifierApp(QMainWindow):
     
     def _toggle_full_tracking_input(self, checked):
         self.full_tracking_prompt_input.setEnabled(checked)
+        for level_check, prompt_input in self.prompt_inputs:
+            level_check.setEnabled(not checked)
+            prompt_input.setEnabled(not checked)
 
     def _toggle_custom_dest_input(self, checked):
         self.custom_dest_path_input.setEnabled(checked)
@@ -554,48 +557,35 @@ class ImageClassifierApp(QMainWindow):
     
         # 현재 설정 저장
         self.save_current_settings()
-        
-        # 나머지 코드는 그대로...
 
-    def closeEvent(self, event):
-        # 현재 설정 저장
-        self.save_current_settings()
-    
-        # 기존 코드 그대로 유지
-        if self.worker and self.worker.isRunning():
-            reply = QMessageBox.question(self, '작업 중단', 
-                                         "작업이 진행 중입니다. 종료하시겠습니까?",
-                                         QMessageBox.Yes | QMessageBox.No, 
-                                         QMessageBox.No)
-            
-            if reply == QMessageBox.Yes:
-                self.worker.cancel()
-                self.worker.wait()
-                event.accept()
-            else:
-                event.ignore()
+        # 유효성 검사
+        if self.full_tracking_check.isChecked():
+            if not self.full_tracking_prompt_input.text().strip():
+                QMessageBox.warning(self, "경고", "전체추적 프롬프트가 비어있습니다.")
+                return
         else:
-            event.accept()
+            prompt_levels = []
+            for level_check, prompt_input in self.prompt_inputs:
+                prompt_levels.append((level_check.isChecked(), prompt_input.text()))
+                
+            # 최소한 하나의 프롬프트 레벨이 활성화되었는지 확인
+            if not any(enabled for enabled, _ in prompt_levels):
+                QMessageBox.warning(self, "경고", "최소한 하나의 프롬프트 레벨을 활성화해야 합니다.")
+                return
+                
+            # 활성화된 모든 레벨에 프롬프트가 입력되었는지 확인
+            for i, (enabled, prompt) in enumerate(prompt_levels):
+                if enabled and not prompt.strip():
+                    QMessageBox.warning(self, "경고", f"레벨 {i+1}의 프롬프트가 비어있습니다.")
+                    return
 
-    def start_classification(self):
-        if not self.source_dir:
-            QMessageBox.warning(self, "경고", "소스 디렉토리가 선택되지 않았습니다.")
-            return
-            
-        # 활성화된 프롬프트 레벨 확인
-        prompt_levels = []
-        for level_check, prompt_input in self.prompt_inputs:
-            prompt_levels.append((level_check.isChecked(), prompt_input.text()))
-            
-        # 최소한 하나의 프롬프트 레벨이 활성화되었는지 확인
-        if not any(enabled for enabled, _ in prompt_levels):
-            QMessageBox.warning(self, "경고", "최소한 하나의 프롬프트 레벨을 활성화해야 합니다.")
-            return
-            
-        # 활성화된 모든 레벨에 프롬프트가 입력되었는지 확인
-        for i, (enabled, prompt) in enumerate(prompt_levels):
-            if enabled and not prompt.strip():
-                QMessageBox.warning(self, "경고", f"레벨 {i+1}의 프롬프트가 비어있습니다.")
+        # 사용자 지정 대상 폴더가 활성화된 경우 경로 유효성 검사
+        if self.custom_dest_check.isChecked():
+            if not self.custom_dest_path_input.text().strip():
+                QMessageBox.warning(self, "경고", "사용자 지정 대상 폴더 경로가 비어있습니다.")
+                return
+            if not os.path.isdir(self.custom_dest_path_input.text()):
+                QMessageBox.warning(self, "경고", "사용자 지정 대상 폴더 경로가 유효하지 않습니다.")
                 return
                 
         # UI 상태 업데이트
@@ -607,7 +597,7 @@ class ImageClassifierApp(QMainWindow):
         # 워커 스레드 생성 및 시작
         self.worker = ImageClassifierWorker(
             self.source_dir, 
-            prompt_levels,
+            prompt_levels if not self.full_tracking_check.isChecked() else [], # 전체추적 모드일 때는 빈 리스트 전달
             self.rename_check.isChecked(),
             self.full_tracking_check.isChecked(),
             self.full_tracking_prompt_input.text(),

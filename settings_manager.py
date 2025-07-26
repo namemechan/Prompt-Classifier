@@ -5,6 +5,7 @@
 import os
 import json
 import logging
+import sys
 from typing import Dict, List, Tuple, Any, Optional, Union
 
 
@@ -22,7 +23,12 @@ class SettingsManager:
         self.app_name = app_name
         
         # 현재 실행 파일이 있는 디렉토리를 기준으로 경로 설정
-        self.settings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), app_name)
+        if getattr(sys, 'frozen', False):
+            # PyInstaller로 패키징된 경우
+            self.settings_dir = os.path.join(os.path.dirname(sys.executable), app_name)
+        else:
+            # 일반 파이썬 스크립트 실행의 경우
+            self.settings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), app_name)
         self.settings_file = os.path.join(self.settings_dir, "settings.json")
         self.presets_dir = os.path.join(self.settings_dir, "presets")
         
