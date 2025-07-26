@@ -54,7 +54,11 @@ class SettingsManager:
                 {"enabled": False, "prompt": ""},
                 {"enabled": False, "prompt": ""},
                 {"enabled": False, "prompt": ""}
-            ]
+            ],
+            "full_tracking_enabled": False,
+            "full_tracking_prompt": "",
+            "custom_dest_enabled": False,
+            "custom_dest_path": ""
         }
     
     def load_settings(self) -> Dict[str, Any]:
@@ -103,6 +107,18 @@ class SettingsManager:
                             validated["prompt_levels"][i]["enabled"] = level["enabled"]
                         if "prompt" in level and isinstance(level["prompt"], str):
                             validated["prompt_levels"][i]["prompt"] = level["prompt"]
+                            
+        # 전체추적 설정 검증
+        if "full_tracking_enabled" in settings and isinstance(settings["full_tracking_enabled"], bool):
+            validated["full_tracking_enabled"] = settings["full_tracking_enabled"]
+        if "full_tracking_prompt" in settings and isinstance(settings["full_tracking_prompt"], str):
+            validated["full_tracking_prompt"] = settings["full_tracking_prompt"]
+                            
+        # 사용자 지정 대상 폴더 설정 검증
+        if "custom_dest_enabled" in settings and isinstance(settings["custom_dest_enabled"], bool):
+            validated["custom_dest_enabled"] = settings["custom_dest_enabled"]
+        if "custom_dest_path" in settings and isinstance(settings["custom_dest_path"], str):
+            validated["custom_dest_path"] = settings["custom_dest_path"]
                 
         return validated
     
@@ -228,12 +244,12 @@ class SettingsManager:
             self.logger.error(f"프리셋 '{name}' 삭제 중 오류 발생: {e}")
             return False
     
-    def get_settings_for_ui(self) -> Tuple[str, bool, List[Tuple[bool, str]]]:
+    def get_settings_for_ui(self) -> Tuple[str, bool, List[Tuple[bool, str]], bool, str, bool, str]:
         """
         UI에 쉽게 적용할 수 있는 형태로 현재 설정 반환
         
         Returns:
-            (소스 디렉토리, 이름 변경 여부, 프롬프트 레벨 목록) 튜플
+            (소스 디렉토리, 이름 변경 여부, 프롬프트 레벨 목록, 전체추적 활성화 여부, 전체추적 프롬프트, 사용자 지정 대상 폴더 활성화 여부, 사용자 지정 대상 폴더 경로) 튜플
         """
         source_dir = self.current_settings.get("source_directory", "")
         rename_images = self.current_settings.get("rename_images", False)
@@ -245,11 +261,19 @@ class SettingsManager:
         # 항상 5개의 레벨이 있도록 보장
         while len(prompt_levels) < 5:
             prompt_levels.append((False, ""))
+            
+        full_tracking_enabled = self.current_settings.get("full_tracking_enabled", False)
+        full_tracking_prompt = self.current_settings.get("full_tracking_prompt", "")
         
-        return source_dir, rename_images, prompt_levels
+        custom_dest_enabled = self.current_settings.get("custom_dest_enabled", False)
+        custom_dest_path = self.current_settings.get("custom_dest_path", "")
+        
+        return source_dir, rename_images, prompt_levels, full_tracking_enabled, full_tracking_prompt, custom_dest_enabled, custom_dest_path
     
     def create_settings_from_ui(self, source_dir: str, rename_images: bool, 
-                              prompt_levels: List[Tuple[bool, str]]) -> Dict[str, Any]:
+                              prompt_levels: List[Tuple[bool, str]],
+                              full_tracking_enabled: bool, full_tracking_prompt: str,
+                              custom_dest_enabled: bool, custom_dest_path: str) -> Dict[str, Any]:
         """
         UI 값에서 설정 딕셔너리 생성
         
@@ -257,6 +281,10 @@ class SettingsManager:
             source_dir: 소스 디렉토리 경로
             rename_images: 이름 변경 여부
             prompt_levels: 프롬프트 레벨 목록
+            full_tracking_enabled: 전체추적 활성화 여부
+            full_tracking_prompt: 전체추적 프롬프트
+            custom_dest_enabled: 사용자 지정 대상 폴더 활성화 여부
+            custom_dest_path: 사용자 지정 대상 폴더 경로
             
         Returns:
             설정 딕셔너리
@@ -272,7 +300,11 @@ class SettingsManager:
         settings = {
             "source_directory": source_dir or "",
             "rename_images": bool(rename_images),
-            "prompt_levels": levels
+            "prompt_levels": levels,
+            "full_tracking_enabled": bool(full_tracking_enabled),
+            "full_tracking_prompt": full_tracking_prompt or "",
+            "custom_dest_enabled": bool(custom_dest_enabled),
+            "custom_dest_path": custom_dest_path or ""
         }
         
         return settings
