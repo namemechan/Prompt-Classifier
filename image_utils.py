@@ -3,34 +3,48 @@
 프롬프트 정보 추출과 관련된 함수들을 포함
 """
 import gzip
+import json
 from typing import Optional, Tuple
 from PIL import Image, ExifTags
+import piexif
+import piexif.helper
 
 def read_info_from_image(image_path: str) -> str:
     try:
         with Image.open(image_path) as img:
-            # 방법 1: PNG 메타데이터 읽기
+            # 방법 1: PNG 메타데이터 읽기 (parameters 항목)
             png_info = img.info
             prompt_info = png_info.get("parameters", "")
             if prompt_info:
                 return prompt_info
 
-            # **추가**: EXIF 데이터에서 프롬프트 정보 추출
-            exif_data = img.getexif()
-            if exif_data:
-                for tag, value in exif_data.items():
-                    tag_name = ExifTags.TAGS.get(tag, tag)
-                    # 일반적으로 프롬프트 정보가 담길 수 있는 태그 (필요에 따라 조정)
-                    if tag_name in ["UserComment", "ImageDescription", "XPComment"]:
-                        if isinstance(value, bytes):
-                            try:
-                                value = value.decode('utf-8', errors='ignore')
-                            except Exception:
-                                continue
-                        if value:
-                            return value
+            # 방법 2: EXIF 데이터에서 프롬프트 정보 추출 (JPEG, WEBP 등)
+            if img.format in ["JPEG", "WEBP"]:
+                try:
+                    # piexif를 사용하여 EXIF 데이터 로드
+                    exif_data = piexif.load(img.info.get("exif"))
+                    if exif_data and "Exif" in exif_data:
+                        user_comment = exif_data["Exif"].get(piexif.ExifIFD.UserComment)
+                        if user_comment:
+                            # piexif.helper.UserComment.load를 사용하여 디코딩
+                            decoded_comment = piexif.helper.UserComment.load(user_comment)
+                            # image_data_reader.py에서처럼 JSON 파싱 시도 (Fooocus, Easy Diffusion 등)
+                            if decoded_comment.startswith("{") and decoded_comment.endswith("}"):
+                                try:
+                                    comment_json = json.loads(decoded_comment)
+                                    # Fooocus의 경우 "comment" 키에 프롬프트가 있을 수 있음
+                                    if "comment" in comment_json:
+                                        return comment_json["comment"]
+                                    # Easy Diffusion 등 다른 JSON 기반 프롬프트도 처리 가능
+                                    return decoded_comment
+                                except json.JSONDecodeError:
+                                    pass # JSON이 아니면 일반 텍스트로 처리
+                            return decoded_comment
+                except Exception as e:
+                    print(f"EXIF 데이터 읽기 오류: {str(e)}")
+                    pass # EXIF가 없거나 오류 발생 시 다음 방법 시도
 
-            # 방법 2: stealth pnginfo 읽기 (기존 방식)
+            # 방법 3: 기존 stealth pnginfo 읽기 (LSB 스테가노그래피)
             stealth_info = read_info_from_image_stealth(img)
             if stealth_info:
                 return stealth_info
@@ -44,12 +58,6 @@ def read_info_from_image(image_path: str) -> str:
 def read_info_from_image_stealth(image: Image.Image) -> Optional[str]:
     """
     이미지에서 stealth pnginfo를 추출
-    
-    Args:
-        image: PIL Image 객체
-        
-    Returns:
-        추출된 stealth pnginfo 문자열, 추출 실패 시 None
     """
     width, height = image.size
     pixels = image.load()
