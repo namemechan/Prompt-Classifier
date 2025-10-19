@@ -54,6 +54,8 @@ class SettingsManager:
         return {
             "source_directory": "",
             "rename_images": False,
+            "handle_others": False,
+            "resolve_conflicts": False,
             "prompt_levels": [
                 {"enabled": True, "prompt": ""},
                 {"enabled": False, "prompt": ""},
@@ -103,6 +105,12 @@ class SettingsManager:
             
         if "rename_images" in settings and isinstance(settings["rename_images"], bool):
             validated["rename_images"] = settings["rename_images"]
+
+        if "handle_others" in settings and isinstance(settings["handle_others"], bool):
+            validated["handle_others"] = settings["handle_others"]
+
+        if "resolve_conflicts" in settings and isinstance(settings["resolve_conflicts"], bool):
+            validated["resolve_conflicts"] = settings["resolve_conflicts"]
             
         # 프롬프트 레벨 검증
         if "prompt_levels" in settings and isinstance(settings["prompt_levels"], list):
@@ -250,15 +258,17 @@ class SettingsManager:
             self.logger.error(f"프리셋 '{name}' 삭제 중 오류 발생: {e}")
             return False
     
-    def get_settings_for_ui(self) -> Tuple[str, bool, List[Tuple[bool, str]], bool, str, bool, str]:
+    def get_settings_for_ui(self) -> Tuple[str, bool, bool, bool, List[Tuple[bool, str]], bool, str, bool, str]:
         """
         UI에 쉽게 적용할 수 있는 형태로 현재 설정 반환
         
         Returns:
-            (소스 디렉토리, 이름 변경 여부, 프롬프트 레벨 목록, 전체추적 활성화 여부, 전체추적 프롬프트, 사용자 지정 대상 폴더 활성화 여부, 사용자 지정 대상 폴더 경로) 튜플
+            (소스 디렉토리, 이름 변경 여부, 그 외 처리 여부, 동일명 처리 여부, 프롬프트 레벨 목록, 전체추적 활성화 여부, 전체추적 프롬프트, 사용자 지정 대상 폴더 활성화 여부, 사용자 지정 대상 폴더 경로) 튜플
         """
         source_dir = self.current_settings.get("source_directory", "")
         rename_images = self.current_settings.get("rename_images", False)
+        handle_others = self.current_settings.get("handle_others", False)
+        resolve_conflicts = self.current_settings.get("resolve_conflicts", False)
         
         prompt_levels = []
         for level in self.current_settings.get("prompt_levels", []):
@@ -274,9 +284,9 @@ class SettingsManager:
         custom_dest_enabled = self.current_settings.get("custom_dest_enabled", False)
         custom_dest_path = self.current_settings.get("custom_dest_path", "")
         
-        return source_dir, rename_images, prompt_levels, full_tracking_enabled, full_tracking_prompt, custom_dest_enabled, custom_dest_path
+        return source_dir, rename_images, handle_others, resolve_conflicts, prompt_levels, full_tracking_enabled, full_tracking_prompt, custom_dest_enabled, custom_dest_path
     
-    def create_settings_from_ui(self, source_dir: str, rename_images: bool, 
+    def create_settings_from_ui(self, source_dir: str, rename_images: bool, handle_others: bool, resolve_conflicts: bool,
                               prompt_levels: List[Tuple[bool, str]],
                               full_tracking_enabled: bool, full_tracking_prompt: str,
                               custom_dest_enabled: bool, custom_dest_path: str) -> Dict[str, Any]:
@@ -286,6 +296,8 @@ class SettingsManager:
         Args:
             source_dir: 소스 디렉토리 경로
             rename_images: 이름 변경 여부
+            handle_others: 그 외 처리 여부
+            resolve_conflicts: 동일명 처리 여부
             prompt_levels: 프롬프트 레벨 목록
             full_tracking_enabled: 전체추적 활성화 여부
             full_tracking_prompt: 전체추적 프롬프트
@@ -306,6 +318,8 @@ class SettingsManager:
         settings = {
             "source_directory": source_dir or "",
             "rename_images": bool(rename_images),
+            "handle_others": bool(handle_others),
+            "resolve_conflicts": bool(resolve_conflicts),
             "prompt_levels": levels,
             "full_tracking_enabled": bool(full_tracking_enabled),
             "full_tracking_prompt": full_tracking_prompt or "",

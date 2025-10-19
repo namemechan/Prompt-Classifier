@@ -138,17 +138,63 @@ def _get_exifdict_from_infostr(info_str):
 def _get_naidict_from_exifdict(exif_dict):
     try:
         nai_dict = {}
+        all_prompts = []
+        all_neg_prompts = []
 
-        # 프롬프트 처리 (None인 경우 빈 문자열로)
-        nai_dict["prompt"] = (exif_dict.get("prompt") or "").strip()
+        # 1. Get base prompts
+        main_prompt = (exif_dict.get("prompt") or "").strip()
+        if main_prompt:
+            all_prompts.append(main_prompt)
 
-        # 네거티브 프롬프트 처리
-        if "uc" in exif_dict and exif_dict.get("uc") is not None:
-            nai_dict["negative_prompt"] = (exif_dict.get("uc") or "").strip()
-        elif "negative_prompt" in exif_dict and exif_dict.get("negative_prompt") is not None:
-            nai_dict["negative_prompt"] = (exif_dict.get("negative_prompt") or "").strip()
-        else:
-            nai_dict["negative_prompt"] = ""
+        neg_prompt = (exif_dict.get("uc") or exif_dict.get("negative_prompt") or "").strip()
+        if neg_prompt:
+            all_neg_prompts.append(neg_prompt)
+
+        # 2. Handle top-level char_captions (first structure)
+        char_captions_v1 = exif_dict.get("char_captions")
+        if isinstance(char_captions_v1, list):
+            for caption in char_captions_v1:
+                if isinstance(caption, dict):
+                    char_prompt = (caption.get("prompt") or "").strip()
+                    if char_prompt:
+                        all_prompts.append(char_prompt)
+                    
+                    char_neg_prompt = (caption.get("neg_prompt") or "").strip()
+                    if char_neg_prompt:
+                        all_neg_prompts.append(char_neg_prompt)
+
+        # 3. Handle nested v4_prompt structure (second structure)
+        v4_prompt_obj = exif_dict.get("v4_prompt")
+        if isinstance(v4_prompt_obj, dict):
+            caption_obj = v4_prompt_obj.get("caption")
+            if isinstance(caption_obj, dict):
+                char_captions_v2 = caption_obj.get("char_captions")
+                if isinstance(char_captions_v2, list):
+                    for caption in char_captions_v2:
+                        if isinstance(caption, dict):
+                            char_prompt = (caption.get("char_caption") or "").strip()
+                            if char_prompt:
+                                all_prompts.append(char_prompt)
+        
+        # 4. Handle nested v4_negative_prompt structure
+        v4_neg_prompt_obj = exif_dict.get("v4_negative_prompt")
+        if isinstance(v4_neg_prompt_obj, dict):
+            caption_obj = v4_neg_prompt_obj.get("caption")
+            if isinstance(caption_obj, dict):
+                char_captions_v2_neg = caption_obj.get("char_captions")
+                if isinstance(char_captions_v2_neg, list):
+                    for caption in char_captions_v2_neg:
+                        if isinstance(caption, dict):
+                            char_neg_prompt = (caption.get("char_caption") or "").strip()
+                            if char_neg_prompt:
+                                all_neg_prompts.append(char_neg_prompt)
+
+        # 5. Combine and deduplicate prompts
+        unique_prompts = list(dict.fromkeys(all_prompts))
+        unique_neg_prompts = list(dict.fromkeys(all_neg_prompts))
+
+        nai_dict["prompt"] = ", ".join(unique_prompts)
+        nai_dict["negative_prompt"] = ", ".join(unique_neg_prompts)
 
         # 옵션 추출
         option_dict = {}
@@ -165,7 +211,7 @@ def _get_naidict_from_exifdict(exif_dict):
 
         # 기타 정보 처리
         etc_dict = {}
-        excluded_keys = list(TARGETKEY_NAIDICT_OPTION) + ["prompt", "uc", "negative_prompt"]
+        excluded_keys = list(TARGETKEY_NAIDICT_OPTION) + ["prompt", "uc", "negative_prompt", "char_captions", "v4_prompt", "v4_negative_prompt"]
         excluded_keys.extend(WEBUI_OPTION_MAPPING.keys())
 
         for key in exif_dict.keys():
@@ -362,15 +408,14 @@ def _extract_comfyui_prompt(image_info: dict) -> Optional[str]:
     return None
 
 def read_info_from_image_stealth(image: Image.Image) -> Optional[str]:
+    # from https://github.com/neggles/sd-webui-stealth-pnginfo/
     """
     이미지에서 stealth pnginfo를 추출
     """
     width, height = image.size
     pixels = image.load()
 
-    has_alpha = image.mode == 'RGBA'
-    
-    # 초기화
+    has_alpha = True if image.mode == 'RGBA' else False
     mode = None
     compressed = False
     binary_data = ''
@@ -378,144 +423,101 @@ def read_info_from_image_stealth(image: Image.Image) -> Optional[str]:
     buffer_rgb = ''
     index_a = 0
     index_rgb = 0
-    
-    # 상태 플래그
     sig_confirmed = False
     confirming_signature = True
     reading_param_len = False
     reading_param = False
     read_end = False
-    param_len = 0
-    
-    # 픽셀별로 처리
     for x in range(width):
         for y in range(height):
-            # 픽셀 값 가져오기
             if has_alpha:
                 r, g, b, a = pixels[x, y]
                 buffer_a += str(a & 1)
                 index_a += 1
             else:
                 r, g, b = pixels[x, y]
-            
             buffer_rgb += str(r & 1)
             buffer_rgb += str(g & 1)
             buffer_rgb += str(b & 1)
             index_rgb += 3
-            
-            # 상태에 따른 처리
             if confirming_signature:
-                if _check_signature(buffer_a, buffer_rgb, index_a, index_rgb, has_alpha):
-                    sig_confirmed, confirming_signature, reading_param_len, mode, compressed, buffer_a, buffer_rgb, index_a, index_rgb = _process_signature(buffer_a, buffer_rgb, index_a, index_rgb, has_alpha)
+                if index_a == len('stealth_pnginfo') * 8:
+                    decoded_sig = bytearray(int(buffer_a[i:i + 8], 2) for i in
+                                            range(0, len(buffer_a), 8)).decode('utf-8', errors='ignore')
+                    if decoded_sig in {'stealth_pnginfo', 'stealth_pngcomp'}:
+                        confirming_signature = False
+                        sig_confirmed = True
+                        reading_param_len = True
+                        mode = 'alpha'
+                        if decoded_sig == 'stealth_pngcomp':
+                            compressed = True
+                        buffer_a = ''
+                        index_a = 0
+                    else:
+                        read_end = True
+                        break
+                elif index_rgb == len('stealth_pnginfo') * 8:
+                    decoded_sig = bytearray(int(buffer_rgb[i:i + 8], 2) for i in
+                                            range(0, len(buffer_rgb), 8)).decode('utf-8', errors='ignore')
+                    if decoded_sig in {'stealth_rgbinfo', 'stealth_rgbcomp'}:
+                        confirming_signature = False
+                        sig_confirmed = True
+                        reading_param_len = True
+                        mode = 'rgb'
+                        if decoded_sig == 'stealth_rgbcomp':
+                            compressed = True
+                        buffer_rgb = ''
+                        index_rgb = 0
             elif reading_param_len:
-                if _is_param_len_ready(mode, index_a, index_rgb):
-                    reading_param_len, reading_param, param_len, buffer_a, buffer_rgb, index_a, index_rgb = _process_param_len(mode, buffer_a, buffer_rgb, index_a, index_rgb)
+                if mode == 'alpha':
+                    if index_a == 32:
+                        param_len = int(buffer_a, 2)
+                        reading_param_len = False
+                        reading_param = True
+                        buffer_a = ''
+                        index_a = 0
+                else:
+                    if index_rgb == 33:
+                        pop = buffer_rgb[-1]
+                        buffer_rgb = buffer_rgb[:-1]
+                        param_len = int(buffer_rgb, 2)
+                        reading_param_len = False
+                        reading_param = True
+                        buffer_rgb = pop
+                        index_rgb = 1
             elif reading_param:
-                if _is_param_ready(mode, index_a, index_rgb, param_len):
-                    binary_data = buffer_a if mode == 'alpha' else buffer_rgb
-                    read_end = True
-                    break
+                if mode == 'alpha':
+                    if index_a == param_len:
+                        binary_data = buffer_a
+                        read_end = True
+                        break
+                else:
+                    if index_rgb >= param_len:
+                        diff = param_len - index_rgb
+                        if diff < 0:
+                            buffer_rgb = buffer_rgb[:diff]
+                        binary_data = buffer_rgb
+                        read_end = True
+                        break
             else:
-                # 불가능한 상태
+                # impossible
                 read_end = True
                 break
-                
         if read_end:
             break
-    
-    # 데이터 디코딩
-    if sig_confirmed and binary_data:
-        return _decode_binary_data(binary_data, compressed)
-    
+    if sig_confirmed and binary_data != '':
+        # Convert binary string to UTF-8 encoded text
+        byte_data = bytearray(int(binary_data[i:i + 8], 2)
+                              for i in range(0, len(binary_data), 8))
+        try:
+            if compressed:
+                decoded_data = gzip.decompress(
+                    bytes(byte_data)).decode('utf-8')
+            else:
+                decoded_data = byte_data.decode('utf-8', errors='ignore')
+            return decoded_data
+        except Exception as e:
+            print(e)
+            pass
+
     return None
-
-
-def _check_signature(buffer_a: str, buffer_rgb: str, index_a: int, index_rgb: int, has_alpha: bool) -> bool:
-    """시그니처 확인이 가능한지 체크"""
-    if has_alpha and index_a == len('stealth_pnginfo') * 8:
-        return True
-    elif index_rgb == len('stealth_pnginfo') * 8:
-        return True
-    return False
-
-
-def _process_signature(buffer_a: str, buffer_rgb: str, index_a: int, index_rgb: int, has_alpha: bool) -> Tuple:
-    """시그니처 처리"""
-    sig_confirmed = False
-    confirming_signature = False
-    reading_param_len = False
-    mode = None
-    compressed = False
-    
-    if has_alpha:
-        decoded_sig = _decode_bytes(buffer_a)
-        if decoded_sig in {'stealth_pnginfo', 'stealth_pngcomp'}:
-            sig_confirmed = True
-            reading_param_len = True
-            mode = 'alpha'
-            compressed = decoded_sig == 'stealth_pngcomp'
-            buffer_a = ''
-            index_a = 0
-    else:
-        decoded_sig = _decode_bytes(buffer_rgb)
-        if decoded_sig in {'stealth_rgbinfo', 'stealth_rgbcomp'}:
-            sig_confirmed = True
-            reading_param_len = True
-            mode = 'rgb'
-            compressed = decoded_sig == 'stealth_rgbcomp'
-            buffer_rgb = ''
-            index_rgb = 0
-    
-    return sig_confirmed, confirming_signature, reading_param_len, mode, compressed, buffer_a, buffer_rgb, index_a, index_rgb
-
-
-def _is_param_len_ready(mode: str, index_a: int, index_rgb: int) -> bool:
-    """파라미터 길이를 읽을 준비가 되었는지 확인"""
-    return (mode == 'alpha' and index_a == 32) or (mode == 'rgb' and index_rgb == 33)
-
-
-def _process_param_len(mode: str, buffer_a: str, buffer_rgb: str, index_a: int, index_rgb: int) -> Tuple:
-    """파라미터 길이 처리"""
-    reading_param_len = False
-    reading_param = True
-    param_len = 0
-    
-    if mode == 'alpha':
-        param_len = int(buffer_a, 2)
-        buffer_a = ''
-        index_a = 0
-    else:
-        pop = buffer_rgb[-1]
-        buffer_rgb = buffer_rgb[:-1]
-        param_len = int(buffer_rgb, 2)
-        buffer_rgb = pop
-        index_rgb = 1
-    
-    return reading_param_len, reading_param, param_len, buffer_a, buffer_rgb, index_a, index_rgb
-
-
-def _is_param_ready(mode: str, index_a: int, index_rgb: int, param_len: int) -> bool:
-    """파라미터를 읽을 준비가 되었는지 확인"""
-    return (mode == 'alpha' and index_a == param_len) or (mode == 'rgb' and index_rgb >= param_len)
-
-
-def _decode_bytes(binary_str: str) -> str:
-    """바이너리 문자열을 문자열로 디코딩"""
-    try:
-        byte_data = bytearray(int(binary_str[i:i + 8], 2) for i in range(0, len(binary_str), 8))
-        return byte_data.decode('utf-8', errors='ignore')
-    except Exception:
-        return ""
-
-
-def _decode_binary_data(binary_data: str, compressed: bool) -> Optional[str]:
-    """바이너리 데이터를 디코딩"""
-    try:
-        byte_data = bytearray(int(binary_data[i:i + 8], 2) for i in range(0, len(binary_data), 8))
-        if compressed:
-            return gzip.decompress(bytes(byte_data)).decode('utf-8')
-        else:
-            return byte_data.decode('utf-8', errors='ignore')
-    except Exception as e:
-        print(f"데이터 디코딩 오류: {str(e)}")
-        return None

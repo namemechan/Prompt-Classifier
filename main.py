@@ -49,18 +49,19 @@ class ImageClassifierWorker(QThread):
         self.moved_files = []
         self.created_dirs = []
 
-    def __init__(self, source_dir, prompt_levels, rename_images=False, full_tracking_enabled=False, full_tracking_prompt="", custom_dest_enabled=False, custom_dest_path=""):
+    def __init__(self, source_dir, prompt_levels, rename_images=False, handle_others=False, resolve_conflicts=False, full_tracking_enabled=False, full_tracking_prompt="", custom_dest_enabled=False, custom_dest_path=""):
         super().__init__()
         self.source_dir = source_dir
-        self.prompt_levels = prompt_levels  # List of tuples (enabled, prompt_string)
+        self.prompt_levels = prompt_levels
         self.rename_images = rename_images
+        self.handle_others = handle_others
+        self.resolve_conflicts = resolve_conflicts
         self.full_tracking_enabled = full_tracking_enabled
         self.full_tracking_prompt = full_tracking_prompt
         self.custom_dest_enabled = custom_dest_enabled
         self.custom_dest_path = custom_dest_path
         self.canceled = False
         
-    # ImageClassifierWorker 클래스의 run 메소드 수정
     def run(self):
         self.moved_files = []
         self.created_dirs = []
@@ -76,53 +77,40 @@ class ImageClassifierWorker(QThread):
             self.log_updated.emit(f"{len(image_files_with_paths)}개의 이미지를 찾았습니다. 전체추적 분류를 시작합니다...")
             
             prompt_keywords = [p.strip() for p in self.full_tracking_prompt.split('|') if p.strip()]
-            if not prompt_keywords:
-                self.log_updated.emit("전체추적 프롬프트가 비어있습니다. 작업을 중단합니다.")
+            if not prompt_keywords and not self.handle_others:
+                self.log_updated.emit("전체추적 프롬프트가 비어있거나 '그 외 처리'가 비활성화되어 작업을 중단합니다.")
                 self.completed.emit()
                 return
                 
             self._process_images_by_keywords(image_files_with_paths, prompt_keywords)
 
         else:
-            # 기존 프롬프트 레벨 처리 로직
-            image_files = self._find_image_files(self.source_dir)
-            
-            if not image_files:
-                self.log_updated.emit("이미지 파일을 찾을 수 없습니다.")
-                self.completed.emit()
-                return
-            
-            self.log_updated.emit(f"{len(image_files)}개의 이미지를 찾았습니다. 분류를 시작합니다...")
-            
-            # 초기 디렉토리 설정
+            # 프롬프트 레벨 처리 로직
             current_dirs = [self.source_dir]
             
-            # 각 레벨에 대해 처리
             for level_idx, (enabled, prompt_string) in enumerate(self.prompt_levels):
                 if not enabled or not prompt_string.strip():
-                    continue
+                    if level_idx == 0 and self.handle_others:
+                         # 레벨 1 프롬프트가 비어있어도 other 처리를 위해 계속 진행
+                        pass
+                    else:
+                        continue
                     
                 self.log_updated.emit(f"레벨 {level_idx+1} 처리 중 - 프롬프트: {prompt_string}")
                 
-                # 현재 디렉토리에서 모든 이미지 파일 가져오기 
-                # - 이 부분은 이제 하위 디렉토리는 검색하지 않음
                 level_images = self._collect_level_images(current_dirs)
                 
                 if not level_images:
                     self.log_updated.emit("처리할 이미지가 없습니다.")
                     break
                     
-                # 프롬프트 키워드 분리
                 prompt_keywords = [p.strip() for p in prompt_string.split('|') if p.strip()]
                 
-                # 프롬프트 키워드에 따라 이미지 처리
                 next_dirs = self._process_images_by_keywords(level_images, prompt_keywords)
                 
-                # 다음 레벨을 위한 현재 디렉토리 업데이트
                 if next_dirs:
                     current_dirs = next_dirs
                 else:
-                    # 생성된 폴더가 없으면 더 이상 진행하지 않음
                     self.log_updated.emit("더 이상 처리할 디렉토리가 없습니다.")
                     break
         
@@ -139,7 +127,6 @@ class ImageClassifierWorker(QThread):
         """여러 디렉토리에서 이미지 파일 수집 - 지정된 디렉토리만 스캔"""
         level_images = []
         for directory in directories:
-            # 각 디렉토리의 직접적인 이미지 파일만 가져옴(하위 폴더 검색 안함)
             for file in os.listdir(directory):
                 file_path = os.path.join(directory, file)
                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')) and os.path.isfile(file_path):
@@ -160,8 +147,8 @@ class ImageClassifierWorker(QThread):
         total_images = len(images)
         processed = 0
         next_dirs = []
+        unmatched_images = []
         
-        # 키워드별 카운터 초기화
         keyword_counters = {keyword: 0 for keyword in keywords}
         
         for img_dir, img_file in images:
@@ -171,30 +158,36 @@ class ImageClassifierWorker(QThread):
             
             img_path = os.path.join(img_dir, img_file)
             try:
-                # 이미지에서 프롬프트 데이터 읽기
                 prompt_data = read_info_from_image(img_path)
                 
-                if prompt_data:
-                    # 일치하는 키워드 찾기
+                matched_keyword = None
+                if prompt_data and keywords:
                     matched_keyword = self._find_matching_keyword(prompt_data, keywords)
-                    
-                    if matched_keyword:
-                        # 이미지 분류 및 이동
-                        keyword_dir = self._move_image(img_dir, img_file, img_path, matched_keyword, keyword_counters)
-                        
-                        # 다음 레벨을 위한 디렉토리 추가
-                        if keyword_dir not in next_dirs:
-                            next_dirs.append(keyword_dir)
-                    else:
-                        self.log_updated.emit(f"{img_file}에서 일치하는 프롬프트를 찾을 수 없습니다.")
+                
+                if matched_keyword:
+                    keyword_dir = self._move_image(img_dir, img_file, img_path, matched_keyword, keyword_counters)
+                    if keyword_dir and keyword_dir not in next_dirs:
+                        next_dirs.append(keyword_dir)
                 else:
-                    self.log_updated.emit(f"{img_file}에서 프롬프트 데이터를 찾을 수 없습니다.")
+                    unmatched_images.append((img_dir, img_file, img_path))
+                    if not keywords:
+                        pass # 키워드가 없으면 로그를 남기지 않음 (other 처리 전용)
+                    elif prompt_data:
+                        self.log_updated.emit(f"{img_file}: 일치하는 키워드 없음")
+                    else:
+                        self.log_updated.emit(f"{img_file}: 프롬프트 데이터 없음")
             except Exception as e:
                 self.log_updated.emit(f"{img_file} 처리 중 오류 발생: {str(e)}")
             
             processed += 1
             progress = int((processed / total_images) * 100)
             self.progress_updated.emit(progress)
+
+        if self.handle_others and unmatched_images:
+            self.log_updated.emit(f"{len(unmatched_images)}개의 분류되지 않은 파일을 'other' 폴더로 이동합니다...")
+            other_counters = {'other': 0}
+            for img_dir, img_file, img_path in unmatched_images:
+                self._move_image(img_dir, img_file, img_path, 'other', other_counters)
         
         return next_dirs
     
@@ -205,41 +198,44 @@ class ImageClassifierWorker(QThread):
                 return keyword
         return None
     
-    # _move_image 메소드 수정
     def _move_image(self, img_dir, img_file, img_path, keyword, counters):
         """이미지를 해당 키워드 폴더 또는 사용자 지정 폴더로 이동"""
         if self.custom_dest_enabled and self.custom_dest_path:
-            # 사용자 지정 대상 폴더가 활성화된 경우
             target_dir = self.custom_dest_path
-            # 사용자 지정 대상 폴더가 없으면 생성
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir, exist_ok=True)
                 self.created_dirs.append(target_dir)
         else:
-            # 기존 로직: 키워드에 대한 하위 디렉토리 생성
             target_dir = os.path.join(img_dir, keyword)
-            # 새로 생성된 디렉토리 추적
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir, exist_ok=True)
                 self.created_dirs.append(target_dir)
-            else:
-                os.makedirs(target_dir, exist_ok=True)
         
-        # 이미지 이름 변경 처리
         if self.rename_images:
-            # 사용자 지정 대상 폴더로 이동 시에도 키워드 기반 이름 변경 유지
             counters[keyword] += 1
-            new_filename = f"{keyword}_{str(counters[keyword]).zfill(6)}{os.path.splitext(img_file)[1]}"
-            dest_path = os.path.join(target_dir, new_filename)
+            dest_filename = f"{keyword}_{str(counters[keyword]).zfill(6)}{os.path.splitext(img_file)[1]}"
         else:
-            dest_path = os.path.join(target_dir, img_file)
-        
-        # 이동 전 원본 경로와 대상 경로를 저장 (취소용)
+            dest_filename = img_file
+            
+        dest_path = os.path.join(target_dir, dest_filename)
+
+        if os.path.exists(dest_path):
+            if self.resolve_conflicts:
+                base, ext = os.path.splitext(dest_path)
+                counter = 1
+                new_dest_path = f"{base} ({str(counter).zfill(2)}){ext}"
+                while os.path.exists(new_dest_path):
+                    counter += 1
+                    new_dest_path = f"{base} ({str(counter).zfill(2)}){ext}"
+                dest_path = new_dest_path
+                self.log_updated.emit(f"알림: 이름 충돌로 '{os.path.basename(dest_path)}'(으)로 저장")
+            else:
+                self.log_updated.emit(f"경고: '{os.path.basename(dest_path)}' 파일이 이미 존재하여 건너뜁니다.")
+                return None
+
         self.moved_files.append((img_path, dest_path))
-        
-        # 이미지 이동
         shutil.move(img_path, dest_path)
-        self.log_updated.emit(f"{img_file}을(를) {target_dir} 폴더로 이동했습니다.")
+        self.log_updated.emit(f"{img_file} -> {os.path.basename(os.path.dirname(dest_path))}/{os.path.basename(dest_path)}")
         
         return target_dir
     
@@ -249,10 +245,9 @@ class ImageClassifierWorker(QThread):
 
 class ImageClassifierApp(QMainWindow):
 
-    # ImageClassifierApp 클래스에 undo_classification 메소드 추가
     def undo_classification(self):
         """최근 분류 작업 취소"""
-        if not self.worker or not hasattr(self.worker, 'moved_files'):
+        if not self.worker or not hasattr(self.worker, 'moved_files') or not self.worker.moved_files:
             QMessageBox.warning(self, "경고", "취소할 수 있는 작업이 없습니다.")
             return
         
@@ -290,43 +285,40 @@ class ImageClassifierApp(QMainWindow):
     
     def load_settings(self):
         """마지막 설정 로드"""
-        source_dir, rename_images, prompt_levels, full_tracking_enabled, full_tracking_prompt, custom_dest_enabled, custom_dest_path = self.settings_manager.get_settings_for_ui()
+        source_dir, rename_images, handle_others, resolve_conflicts, prompt_levels, full_tracking_enabled, full_tracking_prompt, custom_dest_enabled, custom_dest_path = self.settings_manager.get_settings_for_ui()
         
-        # UI에 설정 적용
         self.source_dir = source_dir
         self.dir_path_label.setText(source_dir if source_dir else "디렉토리가 선택되지 않았습니다")
         self.rename_check.setChecked(rename_images)
+        self.handle_others_check.setChecked(handle_others)
+        self.resolve_conflicts_check.setChecked(resolve_conflicts)
         
-        # 전체추적 설정
         self.full_tracking_check.setChecked(full_tracking_enabled)
         self.full_tracking_prompt_input.setText(full_tracking_prompt)
-        self._toggle_full_tracking_input(full_tracking_enabled) # UI 상태 업데이트
+        self._toggle_full_tracking_input(full_tracking_enabled)
         
-        # 사용자 지정 대상 폴더 설정
         self.custom_dest_check.setChecked(custom_dest_enabled)
         self.custom_dest_path_input.setText(custom_dest_path)
-        self._toggle_custom_dest_input(custom_dest_enabled) # UI 상태 업데이트
+        self._toggle_custom_dest_input(custom_dest_enabled)
         
-        # 프롬프트 레벨 설정
         for i, (level_check, prompt_input) in enumerate(self.prompt_inputs):
             if i < len(prompt_levels):
                 level_check.setChecked(prompt_levels[i][0])
                 prompt_input.setText(prompt_levels[i][1])
         
-        # 프리셋 목록 업데이트
         self.update_preset_list()
     
     def save_current_settings(self):
         """현재 설정 저장"""
-        # UI에서 현재 설정 수집
         prompt_levels = []
         for level_check, prompt_input in self.prompt_inputs:
             prompt_levels.append((level_check.isChecked(), prompt_input.text()))
     
-        # 설정 저장
         settings = self.settings_manager.create_settings_from_ui(
             self.source_dir,
             self.rename_check.isChecked(),
+            self.handle_others_check.isChecked(),
+            self.resolve_conflicts_check.isChecked(),
             prompt_levels,
             self.full_tracking_check.isChecked(),
             self.full_tracking_prompt_input.text(),
@@ -339,15 +331,15 @@ class ImageClassifierApp(QMainWindow):
         """프리셋 저장 대화상자 표시"""
         name, ok = QInputDialog.getText(self, "프리셋 저장", "프리셋 이름:")
         if ok and name:
-            # 현재 설정 수집
             prompt_levels = []
             for level_check, prompt_input in self.prompt_inputs:
                 prompt_levels.append((level_check.isChecked(), prompt_input.text()))
             
-            # 설정 저장
             settings = self.settings_manager.create_settings_from_ui(
                 self.source_dir,
                 self.rename_check.isChecked(),
+                self.handle_others_check.isChecked(),
+                self.resolve_conflicts_check.isChecked(),
                 prompt_levels,
                 self.full_tracking_check.isChecked(),
                 self.full_tracking_prompt_input.text(),
@@ -355,11 +347,9 @@ class ImageClassifierApp(QMainWindow):
                 self.custom_dest_path_input.text()
             )
             
-            # 프리셋으로 저장
             if self.settings_manager.save_preset(name, settings):
                 QMessageBox.information(self, "성공", f"프리셋 '{name}'이(가) 저장되었습니다.")
                 self.update_preset_list()
-                # 저장된 프리셋 선택
                 index = self.preset_combo.findText(name)
                 if index >= 0:
                     self.preset_combo.setCurrentIndex(index)
@@ -368,32 +358,30 @@ class ImageClassifierApp(QMainWindow):
     
     def load_preset(self, index):
         """프리셋 로드"""
-        if index <= 0:  # 기본 설정
+        if index <= 0:
             return
         
         preset_name = self.preset_combo.currentText()
         preset = self.settings_manager.load_preset(preset_name)
         
-        # UI에 설정 적용
         self.source_dir = preset.get("source_directory", "")
         self.dir_path_label.setText(self.source_dir if self.source_dir else "디렉토리가 선택되지 않았습니다")
         self.rename_check.setChecked(preset.get("rename_images", False))
-        
-        # 전체추적 설정
+        self.handle_others_check.setChecked(preset.get("handle_others", False))
+        self.resolve_conflicts_check.setChecked(preset.get("resolve_conflicts", False))
+
         full_tracking_enabled = preset.get("full_tracking_enabled", False)
         full_tracking_prompt = preset.get("full_tracking_prompt", "")
         self.full_tracking_check.setChecked(full_tracking_enabled)
         self.full_tracking_prompt_input.setText(full_tracking_prompt)
-        self._toggle_full_tracking_input(full_tracking_enabled) # UI 상태 업데이트
+        self._toggle_full_tracking_input(full_tracking_enabled)
         
-        # 사용자 지정 대상 폴더 설정
         custom_dest_enabled = preset.get("custom_dest_enabled", False)
         custom_dest_path = preset.get("custom_dest_path", "")
         self.custom_dest_check.setChecked(custom_dest_enabled)
         self.custom_dest_path_input.setText(custom_dest_path)
-        self._toggle_custom_dest_input(custom_dest_enabled) # UI 상태 업데이트
+        self._toggle_custom_dest_input(custom_dest_enabled)
         
-        # 프롬프트 레벨 설정
         prompt_levels = preset.get("prompt_levels", [])
         for i, (level_check, prompt_input) in enumerate(self.prompt_inputs):
             if i < len(prompt_levels):
@@ -455,41 +443,45 @@ class ImageClassifierApp(QMainWindow):
         preset_layout.addWidget(self.delete_preset_btn)
         main_layout.addLayout(preset_layout)
         
-        # 이름 변경 옵션
-        rename_layout = QHBoxLayout()
+        # 옵션 체크박스
+        options_layout = QHBoxLayout()
         self.rename_check = QCheckBox("프롬프트에 맞게 이미지 이름 변경")
-        rename_layout.addWidget(self.rename_check)
-        rename_layout.addStretch()
-        main_layout.addLayout(rename_layout)
+        options_layout.addWidget(self.rename_check)
+        self.handle_others_check = QCheckBox("그 외 처리")
+        options_layout.addWidget(self.handle_others_check)
+        self.resolve_conflicts_check = QCheckBox("동일명 파일 숫자 추가")
+        options_layout.addWidget(self.resolve_conflicts_check)
+        options_layout.addStretch()
+        main_layout.addLayout(options_layout)
         
         # 전체추적 기능
         full_tracking_layout = QHBoxLayout()
         self.full_tracking_check = QCheckBox("전체추적 활성화")
-        self.full_tracking_check.setChecked(False) # 기본적으로 비활성화
+        self.full_tracking_check.setChecked(False)
         self.full_tracking_check.toggled.connect(self._toggle_full_tracking_input)
         full_tracking_layout.addWidget(self.full_tracking_check)
         
         self.full_tracking_prompt_input = QLineEdit()
         self.full_tracking_prompt_input.setPlaceholderText("전체추적 프롬프트를 | 문자로 구분하여 입력")
-        self.full_tracking_prompt_input.setEnabled(False) # 초기에는 비활성화
+        self.full_tracking_prompt_input.setEnabled(False)
         full_tracking_layout.addWidget(self.full_tracking_prompt_input, 1)
         main_layout.addLayout(full_tracking_layout)
         
         # 사용자 지정 대상 폴더 기능
         custom_dest_layout = QHBoxLayout()
         self.custom_dest_check = QCheckBox("사용자 지정 대상 폴더 사용")
-        self.custom_dest_check.setChecked(False) # 기본적으로 비활성화
+        self.custom_dest_check.setChecked(False)
         self.custom_dest_check.toggled.connect(self._toggle_custom_dest_input)
         custom_dest_layout.addWidget(self.custom_dest_check)
         
         self.custom_dest_path_input = QLineEdit()
         self.custom_dest_path_input.setPlaceholderText("이미지를 이동할 사용자 지정 폴더 경로")
-        self.custom_dest_path_input.setEnabled(False) # 초기에는 비활성화
+        self.custom_dest_path_input.setEnabled(False)
         custom_dest_layout.addWidget(self.custom_dest_path_input, 1)
         
         self.browse_custom_dest_btn = QPushButton("찾아보기...")
         self.browse_custom_dest_btn.clicked.connect(self._browse_custom_dest_directory)
-        self.browse_custom_dest_btn.setEnabled(False) # 초기에는 비활성화
+        self.browse_custom_dest_btn.setEnabled(False)
         custom_dest_layout.addWidget(self.browse_custom_dest_btn)
         main_layout.addLayout(custom_dest_layout)
         
@@ -499,12 +491,10 @@ class ImageClassifierApp(QMainWindow):
         for i in range(5):
             level_layout = QHBoxLayout()
             
-            # 이 레벨을 활성화/비활성화하는 체크박스
             level_check = QCheckBox(f"레벨 {i+1}:")
-            level_check.setChecked(i == 0)  # 기본적으로 첫 번째 레벨 활성화
+            level_check.setChecked(i == 0)
             level_layout.addWidget(level_check)
             
-            # 프롬프트 입력 필드
             prompt_input = QLineEdit()
             prompt_input.setPlaceholderText(f"레벨 {i+1} 프롬프트를 | 문자로 구분하여 입력")
             level_layout.addWidget(prompt_input, 1)
@@ -524,7 +514,6 @@ class ImageClassifierApp(QMainWindow):
         self.log_text.setReadOnly(True)
         main_layout.addWidget(self.log_text)
         
-        # init_ui 메소드의 버튼 레이아웃 부분 수정
         # 실행 버튼
         buttons_layout = QHBoxLayout()
         self.start_btn = QPushButton("분류 시작")
@@ -536,7 +525,6 @@ class ImageClassifierApp(QMainWindow):
         self.cancel_btn.setEnabled(False)
         buttons_layout.addWidget(self.cancel_btn)
         
-        # 작업 취소 버튼 추가
         self.undo_btn = QPushButton("이전 작업 취소")
         self.undo_btn.clicked.connect(self.undo_classification)
         buttons_layout.addWidget(self.undo_btn)
@@ -559,45 +547,42 @@ class ImageClassifierApp(QMainWindow):
         dir_path = QFileDialog.getExistingDirectory(self, "대상 디렉토리 선택")
         if dir_path:
             self.custom_dest_path_input.setText(dir_path)
-            self.save_current_settings() # 디렉토리 변경 시 설정 저장
+            self.save_current_settings()
         
     def browse_directory(self):
         dir_path = QFileDialog.getExistingDirectory(self, "소스 디렉토리 선택")
         if dir_path:
             self.source_dir = dir_path
             self.dir_path_label.setText(dir_path)
-            self.save_current_settings()  # 디렉토리 변경 시 설정 저장
+            self.save_current_settings()
 
     def start_classification(self):
         if not self.source_dir:
             QMessageBox.warning(self, "경고", "소스 디렉토리가 선택되지 않았습니다.")
             return
     
-        # 현재 설정 저장
         self.save_current_settings()
 
-        # 유효성 검사
-        if self.full_tracking_check.isChecked():
-            if not self.full_tracking_prompt_input.text().strip():
-                QMessageBox.warning(self, "경고", "전체추적 프롬프트가 비어있습니다.")
-                return
-        else:
-            prompt_levels = []
-            for level_check, prompt_input in self.prompt_inputs:
-                prompt_levels.append((level_check.isChecked(), prompt_input.text()))
-                
-            # 최소한 하나의 프롬프트 레벨이 활성화되었는지 확인
-            if not any(enabled for enabled, _ in prompt_levels):
-                QMessageBox.warning(self, "경고", "최소한 하나의 프롬프트 레벨을 활성화해야 합니다.")
-                return
-                
-            # 활성화된 모든 레벨에 프롬프트가 입력되었는지 확인
-            for i, (enabled, prompt) in enumerate(prompt_levels):
-                if enabled and not prompt.strip():
-                    QMessageBox.warning(self, "경고", f"레벨 {i+1}의 프롬프트가 비어있습니다.")
-                    return
+        prompt_levels = []
+        for level_check, prompt_input in self.prompt_inputs:
+            prompt_levels.append((level_check.isChecked(), prompt_input.text()))
 
-        # 사용자 지정 대상 폴더가 활성화된 경우 경로 유효성 검사
+        is_any_level_active = any(enabled for enabled, _ in prompt_levels)
+        is_full_tracking_active = self.full_tracking_check.isChecked() and self.full_tracking_prompt_input.text().strip()
+
+        if not is_full_tracking_active and not is_any_level_active and not self.handle_others_check.isChecked():
+            QMessageBox.warning(self, "경고", "실행할 작업이 없습니다. 프롬프트 레벨을 활성화하거나, 전체추적을 사용하거나, '그 외 처리'를 선택하세요.")
+            return
+
+        if self.full_tracking_check.isChecked() and not self.full_tracking_prompt_input.text().strip() and not self.handle_others_check.isChecked():
+            QMessageBox.warning(self, "경고", "전체추적 프롬프트가 비어있습니다.")
+            return
+
+        for i, (enabled, prompt) in enumerate(prompt_levels):
+            if enabled and not prompt.strip():
+                QMessageBox.warning(self, "경고", f"레벨 {i+1}의 프롬프트가 비어있습니다.")
+                return
+
         if self.custom_dest_check.isChecked():
             if not self.custom_dest_path_input.text().strip():
                 QMessageBox.warning(self, "경고", "사용자 지정 대상 폴더 경로가 비어있습니다.")
@@ -606,17 +591,17 @@ class ImageClassifierApp(QMainWindow):
                 QMessageBox.warning(self, "경고", "사용자 지정 대상 폴더 경로가 유효하지 않습니다.")
                 return
                 
-        # UI 상태 업데이트
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setValue(0)
         self.log_text.clear()
         
-        # 워커 스레드 생성 및 시작
         self.worker = ImageClassifierWorker(
             self.source_dir, 
-            prompt_levels if not self.full_tracking_check.isChecked() else [], # 전체추적 모드일 때는 빈 리스트 전달
+            prompt_levels,
             self.rename_check.isChecked(),
+            self.handle_others_check.isChecked(),
+            self.resolve_conflicts_check.isChecked(),
             self.full_tracking_check.isChecked(),
             self.full_tracking_prompt_input.text(),
             self.custom_dest_check.isChecked(),
@@ -638,7 +623,6 @@ class ImageClassifierApp(QMainWindow):
         
     def update_log(self, message):
         self.log_text.append(message)
-        # 스크롤을 항상 아래로 유지
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
         
