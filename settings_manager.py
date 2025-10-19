@@ -68,7 +68,9 @@ class SettingsManager:
             "full_tracking_enabled": False,
             "full_tracking_prompt": "",
             "custom_dest_enabled": False,
-            "custom_dest_path": ""
+            "custom_dest_path": "",
+            "safe_mode_enabled": False, # New setting
+            "clone_mode_enabled": False # New setting
         }
 
     def load_settings(self) -> Dict[str, Any]:
@@ -106,7 +108,8 @@ class SettingsManager:
             if key in settings and isinstance(settings[key], str):
                 validated[key] = settings[key]
 
-        for key in ["rename_images", "handle_others", "resolve_conflicts", "multicore_enabled", "full_tracking_enabled", "custom_dest_enabled"]:
+        for key in ["rename_images", "handle_others", "resolve_conflicts", "multicore_enabled", 
+                    "full_tracking_enabled", "custom_dest_enabled", "safe_mode_enabled", "clone_mode_enabled"]: # New keys
             if key in settings and isinstance(settings[key], bool):
                 validated[key] = settings[key]
 
@@ -260,14 +263,17 @@ class SettingsManager:
             settings.get("full_tracking_enabled", False),
             settings.get("full_tracking_prompt", ""),
             settings.get("custom_dest_enabled", False),
-            settings.get("custom_dest_path", "")
+            settings.get("custom_dest_path", ""),
+            settings.get("safe_mode_enabled", False), # New setting
+            settings.get("clone_mode_enabled", False) # New setting
         )
 
     def create_settings_from_ui(self, source_dir: str, rename_images: bool, handle_others: bool, resolve_conflicts: bool,
                                   multicore_enabled: bool, multicore_core_count: int,
                                   prompt_levels: List[Tuple[bool, str]],
                                   full_tracking_enabled: bool, full_tracking_prompt: str,
-                                  custom_dest_enabled: bool, custom_dest_path: str) -> Dict[str, Any]:
+                                  custom_dest_enabled: bool, custom_dest_path: str,
+                                  safe_mode_enabled: bool, clone_mode_enabled: bool) -> Dict[str, Any]: # New arguments
         """
         UI 값에서 설정 딕셔너리 생성
         """
@@ -284,5 +290,7 @@ class SettingsManager:
             "full_tracking_enabled": bool(full_tracking_enabled),
             "full_tracking_prompt": full_tracking_prompt or "",
             "custom_dest_enabled": bool(custom_dest_enabled),
-            "custom_dest_path": custom_dest_path or ""
+            "custom_dest_path": custom_dest_path or "",
+            "safe_mode_enabled": bool(safe_mode_enabled), # New setting
+            "clone_mode_enabled": bool(clone_mode_enabled) # New setting
         }

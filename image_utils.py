@@ -163,31 +163,45 @@ def _get_naidict_from_exifdict(exif_dict):
                     if char_neg_prompt:
                         all_neg_prompts.append(char_neg_prompt)
 
-        # 3. Handle nested v4_prompt structure (second structure)
+        # 3. Handle nested v4_prompt structure (for v4.0 and v4.5)
         v4_prompt_obj = exif_dict.get("v4_prompt")
         if isinstance(v4_prompt_obj, dict):
+            char_captions_list = None
             caption_obj = v4_prompt_obj.get("caption")
             if isinstance(caption_obj, dict):
-                char_captions_v2 = caption_obj.get("char_captions")
-                if isinstance(char_captions_v2, list):
-                    for caption in char_captions_v2:
-                        if isinstance(caption, dict):
-                            char_prompt = (caption.get("char_caption") or "").strip()
-                            if char_prompt:
-                                all_prompts.append(char_prompt)
+                char_captions_list = caption_obj.get("char_captions")
+            
+            # Fallback for v4.0 structure where char_captions might be direct
+            if not isinstance(char_captions_list, list):
+                char_captions_list = v4_prompt_obj.get("char_captions")
+
+            if isinstance(char_captions_list, list):
+                for caption in char_captions_list:
+                    if isinstance(caption, dict):
+                        # v4.5 uses 'char_caption', older versions might use 'prompt'
+                        char_prompt = (caption.get("char_caption") or caption.get("prompt") or "").strip()
+                        if char_prompt:
+                            all_prompts.append(char_prompt)
         
-        # 4. Handle nested v4_negative_prompt structure
+        # 4. Handle nested v4_negative_prompt structure (for v4.0 and v4.5)
         v4_neg_prompt_obj = exif_dict.get("v4_negative_prompt")
         if isinstance(v4_neg_prompt_obj, dict):
+            char_captions_list_neg = None
             caption_obj = v4_neg_prompt_obj.get("caption")
             if isinstance(caption_obj, dict):
-                char_captions_v2_neg = caption_obj.get("char_captions")
-                if isinstance(char_captions_v2_neg, list):
-                    for caption in char_captions_v2_neg:
-                        if isinstance(caption, dict):
-                            char_neg_prompt = (caption.get("char_caption") or "").strip()
-                            if char_neg_prompt:
-                                all_neg_prompts.append(char_neg_prompt)
+                char_captions_list_neg = caption_obj.get("char_captions")
+
+            # Fallback for v4.0 structure
+            if not isinstance(char_captions_list_neg, list):
+                char_captions_list_neg = v4_neg_prompt_obj.get("char_captions")
+
+            if isinstance(char_captions_list_neg, list):
+                for caption in char_captions_list_neg:
+                    if isinstance(caption, dict):
+                        # v4.5 uses 'char_caption', older versions might use 'neg_prompt'
+                        char_neg_prompt = (caption.get("char_caption") or caption.get("neg_prompt") or "").strip()
+                        if char_neg_prompt:
+                            all_neg_prompts.append(char_neg_prompt)
 
         # 5. Combine and deduplicate prompts
         unique_prompts = list(dict.fromkeys(all_prompts))
