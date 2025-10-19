@@ -56,6 +56,8 @@ class SettingsManager:
             "rename_images": False,
             "handle_others": False,
             "resolve_conflicts": False,
+            "multicore_enabled": False,
+            "multicore_core_count": os.cpu_count() or 4,
             "prompt_levels": [
                 {"enabled": True, "prompt": ""},
                 {"enabled": False, "prompt": ""},
@@ -68,7 +70,7 @@ class SettingsManager:
             "custom_dest_enabled": False,
             "custom_dest_path": ""
         }
-    
+
     def load_settings(self) -> Dict[str, Any]:
         """
         마지막으로 사용한 설정을 로드
@@ -86,7 +88,7 @@ class SettingsManager:
                 return self.default_settings.copy()
         else:
             return self.default_settings.copy()
-    
+
     def _validate_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         """
         로드된 설정 유효성 검사 및 필요 시 기본값으로 보완
@@ -100,17 +102,16 @@ class SettingsManager:
         validated = self.default_settings.copy()
         
         # 기본 필드 검증
-        if "source_directory" in settings and isinstance(settings["source_directory"], str):
-            validated["source_directory"] = settings["source_directory"]
-            
-        if "rename_images" in settings and isinstance(settings["rename_images"], bool):
-            validated["rename_images"] = settings["rename_images"]
+        for key in ["source_directory", "full_tracking_prompt", "custom_dest_path"]:
+            if key in settings and isinstance(settings[key], str):
+                validated[key] = settings[key]
 
-        if "handle_others" in settings and isinstance(settings["handle_others"], bool):
-            validated["handle_others"] = settings["handle_others"]
+        for key in ["rename_images", "handle_others", "resolve_conflicts", "multicore_enabled", "full_tracking_enabled", "custom_dest_enabled"]:
+            if key in settings and isinstance(settings[key], bool):
+                validated[key] = settings[key]
 
-        if "resolve_conflicts" in settings and isinstance(settings["resolve_conflicts"], bool):
-            validated["resolve_conflicts"] = settings["resolve_conflicts"]
+        if "multicore_core_count" in settings and isinstance(settings["multicore_core_count"], int):
+            validated["multicore_core_count"] = settings["multicore_core_count"]
             
         # 프롬프트 레벨 검증
         if "prompt_levels" in settings and isinstance(settings["prompt_levels"], list):
@@ -122,20 +123,8 @@ class SettingsManager:
                         if "prompt" in level and isinstance(level["prompt"], str):
                             validated["prompt_levels"][i]["prompt"] = level["prompt"]
                             
-        # 전체추적 설정 검증
-        if "full_tracking_enabled" in settings and isinstance(settings["full_tracking_enabled"], bool):
-            validated["full_tracking_enabled"] = settings["full_tracking_enabled"]
-        if "full_tracking_prompt" in settings and isinstance(settings["full_tracking_prompt"], str):
-            validated["full_tracking_prompt"] = settings["full_tracking_prompt"]
-                            
-        # 사용자 지정 대상 폴더 설정 검증
-        if "custom_dest_enabled" in settings and isinstance(settings["custom_dest_enabled"], bool):
-            validated["custom_dest_enabled"] = settings["custom_dest_enabled"]
-        if "custom_dest_path" in settings and isinstance(settings["custom_dest_path"], str):
-            validated["custom_dest_path"] = settings["custom_dest_path"]
-                
         return validated
-    
+
     def save_settings(self, settings: Dict[str, Any]) -> bool:
         """
         현재 설정을 저장
@@ -147,18 +136,16 @@ class SettingsManager:
             성공 여부
         """
         try:
-            # 설정 유효성 검사
             validated_settings = self._validate_settings(settings)
             self.current_settings = validated_settings
             
-            # 파일 저장
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(validated_settings, f, ensure_ascii=False, indent=2)
             return True
         except (IOError, TypeError) as e:
             self.logger.error(f"설정 저장 중 오류 발생: {e}")
             return False
-    
+
     def get_preset_list(self) -> List[str]:
         """
         사용 가능한 프리셋 목록 반환
@@ -169,14 +156,13 @@ class SettingsManager:
         try:
             if not os.path.exists(self.presets_dir):
                 return []
-                
             presets = [f[:-5] for f in os.listdir(self.presets_dir) 
                       if f.endswith('.json') and os.path.isfile(os.path.join(self.presets_dir, f))]
             return sorted(presets)
         except IOError as e:
             self.logger.error(f"프리셋 목록 로드 중 오류 발생: {e}")
             return []
-    
+
     def save_preset(self, name: str, settings: Optional[Dict[str, Any]] = None) -> bool:
         """
         현재 설정을 프리셋으로 저장
@@ -190,15 +176,10 @@ class SettingsManager:
         """
         if not name or not isinstance(name, str):
             return False
-            
         if settings is None:
             settings = self.current_settings
-            
         try:
-            # 유효성 검사된 설정
             validated_settings = self._validate_settings(settings)
-            
-            # 저장
             preset_path = os.path.join(self.presets_dir, f"{name}.json")
             with open(preset_path, 'w', encoding='utf-8') as f:
                 json.dump(validated_settings, f, ensure_ascii=False, indent=2)
@@ -206,7 +187,7 @@ class SettingsManager:
         except (IOError, TypeError) as e:
             self.logger.error(f"프리셋 '{name}' 저장 중 오류 발생: {e}")
             return False
-    
+
     def load_preset(self, name: str) -> Dict[str, Any]:
         """
         저장된 프리셋 로드
@@ -219,7 +200,6 @@ class SettingsManager:
         """
         if not name or not isinstance(name, str):
             return self.current_settings
-            
         try:
             preset_path = os.path.join(self.presets_dir, f"{name}.json")
             if os.path.exists(preset_path):
@@ -232,7 +212,7 @@ class SettingsManager:
         except (json.JSONDecodeError, IOError) as e:
             self.logger.error(f"프리셋 '{name}' 로드 중 오류 발생: {e}")
             return self.current_settings
-    
+
     def delete_preset(self, name: str) -> bool:
         """
         저장된 프리셋 삭제
@@ -245,7 +225,6 @@ class SettingsManager:
         """
         if not name or not isinstance(name, str):
             return False
-            
         try:
             preset_path = os.path.join(self.presets_dir, f"{name}.json")
             if os.path.exists(preset_path):
@@ -257,74 +236,53 @@ class SettingsManager:
         except IOError as e:
             self.logger.error(f"프리셋 '{name}' 삭제 중 오류 발생: {e}")
             return False
-    
-    def get_settings_for_ui(self) -> Tuple[str, bool, bool, bool, List[Tuple[bool, str]], bool, str, bool, str]:
+
+    def get_settings_for_ui(self) -> tuple:
         """
         UI에 쉽게 적용할 수 있는 형태로 현재 설정 반환
-        
-        Returns:
-            (소스 디렉토리, 이름 변경 여부, 그 외 처리 여부, 동일명 처리 여부, 프롬프트 레벨 목록, 전체추적 활성화 여부, 전체추적 프롬프트, 사용자 지정 대상 폴더 활성화 여부, 사용자 지정 대상 폴더 경로) 튜플
         """
-        source_dir = self.current_settings.get("source_directory", "")
-        rename_images = self.current_settings.get("rename_images", False)
-        handle_others = self.current_settings.get("handle_others", False)
-        resolve_conflicts = self.current_settings.get("resolve_conflicts", False)
-        
+        settings = self.current_settings
         prompt_levels = []
-        for level in self.current_settings.get("prompt_levels", []):
+        for level in settings.get("prompt_levels", []):
             prompt_levels.append((level.get("enabled", False), level.get("prompt", "")))
         
-        # 항상 5개의 레벨이 있도록 보장
         while len(prompt_levels) < 5:
             prompt_levels.append((False, ""))
             
-        full_tracking_enabled = self.current_settings.get("full_tracking_enabled", False)
-        full_tracking_prompt = self.current_settings.get("full_tracking_prompt", "")
-        
-        custom_dest_enabled = self.current_settings.get("custom_dest_enabled", False)
-        custom_dest_path = self.current_settings.get("custom_dest_path", "")
-        
-        return source_dir, rename_images, handle_others, resolve_conflicts, prompt_levels, full_tracking_enabled, full_tracking_prompt, custom_dest_enabled, custom_dest_path
-    
+        return (
+            settings.get("source_directory", ""),
+            settings.get("rename_images", False),
+            settings.get("handle_others", False),
+            settings.get("resolve_conflicts", False),
+            settings.get("multicore_enabled", False),
+            settings.get("multicore_core_count", os.cpu_count() or 4),
+            prompt_levels,
+            settings.get("full_tracking_enabled", False),
+            settings.get("full_tracking_prompt", ""),
+            settings.get("custom_dest_enabled", False),
+            settings.get("custom_dest_path", "")
+        )
+
     def create_settings_from_ui(self, source_dir: str, rename_images: bool, handle_others: bool, resolve_conflicts: bool,
-                              prompt_levels: List[Tuple[bool, str]],
-                              full_tracking_enabled: bool, full_tracking_prompt: str,
-                              custom_dest_enabled: bool, custom_dest_path: str) -> Dict[str, Any]:
+                                  multicore_enabled: bool, multicore_core_count: int,
+                                  prompt_levels: List[Tuple[bool, str]],
+                                  full_tracking_enabled: bool, full_tracking_prompt: str,
+                                  custom_dest_enabled: bool, custom_dest_path: str) -> Dict[str, Any]:
         """
         UI 값에서 설정 딕셔너리 생성
-        
-        Args:
-            source_dir: 소스 디렉토리 경로
-            rename_images: 이름 변경 여부
-            handle_others: 그 외 처리 여부
-            resolve_conflicts: 동일명 처리 여부
-            prompt_levels: 프롬프트 레벨 목록
-            full_tracking_enabled: 전체추적 활성화 여부
-            full_tracking_prompt: 전체추적 프롬프트
-            custom_dest_enabled: 사용자 지정 대상 폴더 활성화 여부
-            custom_dest_path: 사용자 지정 대상 폴더 경로
-            
-        Returns:
-            설정 딕셔너리
         """
-        levels = [
-            {
-                "enabled": enabled,
-                "prompt": prompt
-            } 
-            for enabled, prompt in prompt_levels
-        ]
+        levels = [{"enabled": enabled, "prompt": prompt} for enabled, prompt in prompt_levels]
         
-        settings = {
+        return {
             "source_directory": source_dir or "",
             "rename_images": bool(rename_images),
             "handle_others": bool(handle_others),
             "resolve_conflicts": bool(resolve_conflicts),
+            "multicore_enabled": bool(multicore_enabled),
+            "multicore_core_count": int(multicore_core_count),
             "prompt_levels": levels,
             "full_tracking_enabled": bool(full_tracking_enabled),
             "full_tracking_prompt": full_tracking_prompt or "",
             "custom_dest_enabled": bool(custom_dest_enabled),
             "custom_dest_path": custom_dest_path or ""
         }
-        
-        return settings
