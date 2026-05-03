@@ -25,7 +25,9 @@ class SettingsManager:
         # 현재 실행 파일이 있는 디렉토리를 기준으로 경로 설정
         if getattr(sys, 'frozen', False):
             # PyInstaller로 패키징된 경우
-            self.settings_dir = os.path.join(os.path.dirname(sys.executable), app_name)
+            # sys.executable은 .exe 파일의 경로이므로 abspath로 정규화 후 dirname 사용
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+            self.settings_dir = os.path.join(base_dir, app_name)
         else:
             # 일반 파이썬 스크립트 실행의 경우
             self.settings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), app_name)
@@ -59,14 +61,15 @@ class SettingsManager:
             "multicore_enabled": False,
             "multicore_core_count": os.cpu_count() or 4,
             "prompt_levels": [
-                {"enabled": True, "prompt": ""},
-                {"enabled": False, "prompt": ""},
-                {"enabled": False, "prompt": ""},
-                {"enabled": False, "prompt": ""},
-                {"enabled": False, "prompt": ""}
+                {"enabled": True, "prompt": "", "exclude_prompt": ""},
+                {"enabled": False, "prompt": "", "exclude_prompt": ""},
+                {"enabled": False, "prompt": "", "exclude_prompt": ""},
+                {"enabled": False, "prompt": "", "exclude_prompt": ""},
+                {"enabled": False, "prompt": "", "exclude_prompt": ""}
             ],
             "full_tracking_enabled": False,
             "full_tracking_prompt": "",
+            "full_tracking_exclude_prompt": "",  
             "custom_dest_enabled": False,
             "custom_dest_path": "",
             "safe_mode_enabled": False, # New setting
@@ -104,7 +107,7 @@ class SettingsManager:
         validated = self.default_settings.copy()
         
         # 기본 필드 검증
-        for key in ["source_directory", "full_tracking_prompt", "custom_dest_path"]:
+        for key in ["source_directory", "full_tracking_prompt", "full_tracking_exclude_prompt", "custom_dest_path"]:
             if key in settings and isinstance(settings[key], str):
                 validated[key] = settings[key]
 
@@ -125,6 +128,8 @@ class SettingsManager:
                             validated["prompt_levels"][i]["enabled"] = level["enabled"]
                         if "prompt" in level and isinstance(level["prompt"], str):
                             validated["prompt_levels"][i]["prompt"] = level["prompt"]
+                        if "exclude_prompt" in level and isinstance(level["exclude_prompt"], str):
+                            validated["prompt_levels"][i]["exclude_prompt"] = level["exclude_prompt"]
                             
         return validated
 
@@ -243,42 +248,57 @@ class SettingsManager:
     def get_settings_for_ui(self) -> tuple:
         """
         UI에 쉽게 적용할 수 있는 형태로 현재 설정 반환
+        반환 순서: source_dir, rename, handle_others, resolve, multicore, core_count,
+                   prompt_levels[(enabled, prompt, exclude_prompt)...],
+                   full_tracking_enabled, full_tracking_prompt, full_tracking_exclude_prompt,
+                   custom_dest_enabled, custom_dest_path, safe_mode, clone_mode
         """
         settings = self.current_settings
         prompt_levels = []
         for level in settings.get("prompt_levels", []):
-            prompt_levels.append((level.get("enabled", False), level.get("prompt", "")))
-        
+            prompt_levels.append((
+                level.get("enabled", False),
+                level.get("prompt", ""),
+                level.get("exclude_prompt", "")
+            ))
         while len(prompt_levels) < 5:
-            prompt_levels.append((False, ""))
-            
+            prompt_levels.append((False, "", ""))
+
         return (
-            settings.get("source_directory", ""),
-            settings.get("rename_images", False),
-            settings.get("handle_others", False),
-            settings.get("resolve_conflicts", False),
-            settings.get("multicore_enabled", False),
-            settings.get("multicore_core_count", os.cpu_count() or 4),
-            prompt_levels,
-            settings.get("full_tracking_enabled", False),
-            settings.get("full_tracking_prompt", ""),
-            settings.get("custom_dest_enabled", False),
-            settings.get("custom_dest_path", ""),
-            settings.get("safe_mode_enabled", False), # New setting
-            settings.get("clone_mode_enabled", False) # New setting
+            settings.get("source_directory", ""),           # 0
+            settings.get("rename_images", False),           # 1
+            settings.get("handle_others", False),           # 2
+            settings.get("resolve_conflicts", False),       # 3
+            settings.get("multicore_enabled", False),       # 4
+            settings.get("multicore_core_count", os.cpu_count() or 4),  # 5
+            prompt_levels,                                  # 6
+            settings.get("full_tracking_enabled", False),  # 7
+            settings.get("full_tracking_prompt", ""),       # 8
+            settings.get("full_tracking_exclude_prompt", ""),  # 9
+            settings.get("custom_dest_enabled", False),    # 10
+            settings.get("custom_dest_path", ""),          # 11
+            settings.get("safe_mode_enabled", False),      # 12
+            settings.get("clone_mode_enabled", False)      # 13
         )
 
     def create_settings_from_ui(self, source_dir: str, rename_images: bool, handle_others: bool, resolve_conflicts: bool,
                                   multicore_enabled: bool, multicore_core_count: int,
-                                  prompt_levels: List[Tuple[bool, str]],
+                                  prompt_levels: List[Tuple],
                                   full_tracking_enabled: bool, full_tracking_prompt: str,
+                                  full_tracking_exclude_prompt: str,
                                   custom_dest_enabled: bool, custom_dest_path: str,
-                                  safe_mode_enabled: bool, clone_mode_enabled: bool) -> Dict[str, Any]: # New arguments
+                                  safe_mode_enabled: bool, clone_mode_enabled: bool) -> Dict[str, Any]:
         """
         UI 값에서 설정 딕셔너리 생성
+        prompt_levels: [(enabled, prompt, exclude_prompt), ...]
         """
-        levels = [{"enabled": enabled, "prompt": prompt} for enabled, prompt in prompt_levels]
-        
+        levels = []
+        for item in prompt_levels:
+            enabled = item[0]
+            prompt = item[1] if len(item) > 1 else ""
+            exclude_prompt = item[2] if len(item) > 2 else ""
+            levels.append({"enabled": enabled, "prompt": prompt, "exclude_prompt": exclude_prompt})
+
         return {
             "source_directory": source_dir or "",
             "rename_images": bool(rename_images),
@@ -289,8 +309,9 @@ class SettingsManager:
             "prompt_levels": levels,
             "full_tracking_enabled": bool(full_tracking_enabled),
             "full_tracking_prompt": full_tracking_prompt or "",
+            "full_tracking_exclude_prompt": full_tracking_exclude_prompt or "",
             "custom_dest_enabled": bool(custom_dest_enabled),
             "custom_dest_path": custom_dest_path or "",
-            "safe_mode_enabled": bool(safe_mode_enabled), # New setting
-            "clone_mode_enabled": bool(clone_mode_enabled) # New setting
+            "safe_mode_enabled": bool(safe_mode_enabled),
+            "clone_mode_enabled": bool(clone_mode_enabled)
         }

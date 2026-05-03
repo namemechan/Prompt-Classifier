@@ -16,13 +16,19 @@ def sanitize_for_path(name: str) -> str:
     for char in illegal_chars: sanitized = sanitized.replace(char, '_')
     return sanitized[:100]  # 긴 경로 방지 (Windows MAX_PATH 대비)
 
-def process_single_image_task(image_path, keywords):
+def process_single_image_task(image_path, keywords, exclude_keywords=None):
     img_file = os.path.basename(image_path)
     try:
         file_size = os.path.getsize(image_path)
         prompt_data = read_info_from_image(image_path)
         if not prompt_data:
             return {"status": "no_prompt", "path": image_path, "log": f"{img_file}: 프롬프트 데이터 없음"}
+        # 제외 키워드 검사: 하나라도 포함되면 제외
+        if exclude_keywords:
+            for ex_kw in exclude_keywords:
+                if ex_kw.lower() in prompt_data.lower():
+                    return {"status": "excluded", "path": image_path, "size": file_size,
+                            "log": f"{img_file}: 제외 키워드 [{ex_kw}] 포함 — 건너뜀"}
         if not keywords:
             return {"status": "no_keyword_match", "path": image_path, "size": file_size}
         for keyword in keywords:
@@ -40,14 +46,16 @@ class ImageClassifierWorker(QThread):
     safe_mode_dialog_required = pyqtSignal(int, float)
 
     def __init__(self, source_dir, prompt_levels, rename_images=False, handle_others=False, resolve_conflicts=False,
-                 multicore_enabled=False, multicore_core_count=4, full_tracking_enabled=False, full_tracking_prompt="", 
+                 multicore_enabled=False, multicore_core_count=4, full_tracking_enabled=False, full_tracking_prompt="",
+                 full_tracking_exclude_prompt="",
                  custom_dest_enabled=False, custom_dest_path="", safe_mode_enabled=False, clone_mode_enabled=False):
         super().__init__()
         self.source_dir = source_dir
-        self.prompt_levels = prompt_levels
+        self.prompt_levels = prompt_levels  # [(enabled, prompt, exclude_prompt), ...]
         self.rename_images, self.handle_others, self.resolve_conflicts = rename_images, handle_others, resolve_conflicts
         self.multicore_enabled, self.multicore_core_count = multicore_enabled, multicore_core_count
         self.full_tracking_enabled, self.full_tracking_prompt = full_tracking_enabled, full_tracking_prompt
+        self.full_tracking_exclude_prompt = full_tracking_exclude_prompt
         self.custom_dest_enabled, self.custom_dest_path = custom_dest_enabled, custom_dest_path
         self.safe_mode_enabled, self.clone_mode_enabled = safe_mode_enabled, clone_mode_enabled
         self.canceled = False
@@ -62,23 +70,36 @@ class ImageClassifierWorker(QThread):
             if not images:
                 self.completed.emit(0); return
             prompt_keywords = [p.strip() for p in self.full_tracking_prompt.split('|') if p.strip()]
-            self._process_images_by_keywords(images, prompt_keywords, operation_type, handle_others_flag=self.handle_others)
+            exclude_keywords = [p.strip() for p in self.full_tracking_exclude_prompt.split('|') if p.strip()]
+            self._process_images_by_keywords(images, prompt_keywords, operation_type,
+                                              handle_others_flag=self.handle_others,
+                                              exclude_keywords=exclude_keywords)
         else:
             current_dirs = [self.source_dir]
-            active_levels = [(idx, prompt) for idx, (enabled, prompt) in enumerate(self.prompt_levels) if enabled and prompt.strip()]
-            
-            for level_idx, prompt_string in active_levels:
+            active_levels = []
+            for idx, level_data in enumerate(self.prompt_levels):
+                enabled = level_data[0]
+                prompt = level_data[1] if len(level_data) > 1 else ""
+                exclude = level_data[2] if len(level_data) > 2 else ""
+                if enabled and prompt.strip():
+                    active_levels.append((idx, prompt, exclude))
+
+            for level_idx, prompt_string, exclude_string in active_levels:
                 self.log_updated.emit(f"레벨 {level_idx+1} 처리 중...")
                 level_images = self._collect_level_images(current_dirs)
                 if not level_images: break
-                
+
                 keywords = [p.strip() for p in prompt_string.split('|') if p.strip()]
-                next_dirs = self._process_images_by_keywords(level_images, keywords, operation_type, handle_others_flag=False)
+                exclude_keywords = [p.strip() for p in exclude_string.split('|') if p.strip()]
+                next_dirs = self._process_images_by_keywords(level_images, keywords, operation_type,
+                                                              handle_others_flag=False,
+                                                              exclude_keywords=exclude_keywords)
                 if next_dirs: current_dirs = next_dirs
                 else: break
 
             if self.handle_others and not self.canceled:
-                remaining_images = self._collect_level_images([self.source_dir])
+                # 버그4: source_dir 직하가 아닌 마지막 레벨의 current_dirs 기준으로 수집
+                remaining_images = self._collect_level_images(current_dirs)
                 if remaining_images:
                     self.log_updated.emit(f"{len(remaining_images)}개의 미분류 파일을 'other'로 이동합니다...")
                     counters = {'other': 0}
@@ -112,14 +133,15 @@ class ImageClassifierWorker(QThread):
                 if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')): images.append((root, f))
         return images
 
-    def _process_images_by_keywords(self, images, keywords, operation_type, handle_others_flag):
+    def _process_images_by_keywords(self, images, keywords, operation_type, handle_others_flag, exclude_keywords=None):
+        exclude_keywords = exclude_keywords or []
         total, processed, next_dirs, unmatched = len(images), 0, [], []
         counters = {k: 0 for k in keywords}
         paths = [os.path.join(d, f) for d, f in images]
 
         if self.multicore_enabled and self.multicore_core_count > 1:
             with concurrent.futures.ProcessPoolExecutor(max_workers=self.multicore_core_count) as executor:
-                future_to_path = {executor.submit(process_single_image_task, path, keywords): path for path in paths}
+                future_to_path = {executor.submit(process_single_image_task, path, keywords, exclude_keywords): path for path in paths}
                 for future in concurrent.futures.as_completed(future_to_path):
                     if self.canceled:
                         if sys.version_info >= (3, 9): executor.shutdown(wait=False, cancel_futures=True)
@@ -135,7 +157,7 @@ class ImageClassifierWorker(QThread):
                         if result["status"] == "success":
                             target_dir = self._process_image_file(img_dir, img_file, img_path, file_size, result["keyword"], counters, operation_type)
                             if target_dir and target_dir not in next_dirs: next_dirs.append(target_dir)
-                        elif result["status"] in ["no_keyword_match", "no_prompt"]:
+                        elif result["status"] in ["no_keyword_match", "no_prompt", "excluded"]:
                             unmatched.append((img_dir, img_file, img_path, file_size))
                     except Exception as e:
                         self.log_updated.emit(f"처리 중 예외 발생: {e}")
@@ -144,7 +166,7 @@ class ImageClassifierWorker(QThread):
         else:
             for path in paths:
                 if self.canceled: return []
-                result = process_single_image_task(path, keywords)
+                result = process_single_image_task(path, keywords, exclude_keywords)
                 if result.get('log'): self.log_updated.emit(result['log'])
                 img_path, file_size = result["path"], result.get("size", 0)
                 img_dir, img_file = os.path.dirname(img_path), os.path.basename(img_path)
@@ -182,7 +204,10 @@ class ImageClassifierWorker(QThread):
         dest_path = os.path.join(target_dir, dest_filename)
 
         if os.path.exists(dest_path):
-            if not self.resolve_conflicts: return None
+            if not self.resolve_conflicts:
+                # 버그5: 건너뜀을 로그에 명시
+                self.log_updated.emit(f"⏭️ [{keyword}] {img_file} → 동일명 파일 존재, 건너뜀")
+                return None
             base, ext = os.path.splitext(dest_path)
             c = 1
             while os.path.exists(f"{base} ({str(c).zfill(2)}){ext}"): c += 1
@@ -204,8 +229,11 @@ class ImageClassifierWorker(QThread):
             self.log_updated.emit(f"이동 실패: {e}"); return None
 
     def finalize_safe_mode(self, choice):
+        """버그6: 메인 스레드에서 직접 호출되므로 emit 대신 반환값으로 결과를 전달.
+           로그 출력과 완료 처리는 호출 측(show_safe_mode_popup)에서 담당."""
+        logs = []
         if choice == "delete":
-            self.log_updated.emit("파일 무결성 검증 및 원본 삭제 진행...")
+            logs.append("파일 무결성 검증 및 원본 삭제 진행...")
             for info in self.processed_files_info:
                 try:
                     src, dest, size = info['src'], info['dest'], info['size']
@@ -213,20 +241,22 @@ class ImageClassifierWorker(QThread):
                         if os.path.exists(src): os.remove(src)
                         self.undo_info.append({'src': src, 'dest': dest, 'op': 'move'})
                     else:
-                        self.log_updated.emit(f"경고: 복사본 무결성 검증 실패. 원본 보존됨: {src}")
+                        logs.append(f"경고: 복사본 무결성 검증 실패. 원본 보존됨: {src}")
                 except Exception as e:
-                    self.log_updated.emit(f"오류: {info['src']} 삭제 실패: {e}")
+                    logs.append(f"오류: {info['src']} 삭제 실패: {e}")
         elif choice == "keep":
-             for info in self.processed_files_info: self.undo_info.append({'src': info['src'], 'dest': info['dest'], 'op': 'copy'})
+            for info in self.processed_files_info:
+                self.undo_info.append({'src': info['src'], 'dest': info['dest'], 'op': 'copy'})
         elif choice == "undo":
-            self.log_updated.emit("복사본 삭제(실행 취소) 중...")
+            logs.append("복사본 삭제(실행 취소) 중...")
             for info in self.processed_files_info:
                 try:
                     if os.path.exists(info['dest']): os.remove(info['dest'])
                 except: pass
             self.undo_info = []
 
-        self.completed.emit(len(self.processed_files_info) if choice != "undo" else 0)
+        count = len(self.processed_files_info) if choice != "undo" else 0
+        return logs, count
 
     def undo_last_operation(self):
         if not self.undo_info: return
@@ -259,6 +289,9 @@ class ImageClassifierApp(QMainWindow):
         self.setWindowTitle("Prompt Classifier")
         self.setGeometry(100, 100, 800, 600)
         self.settings_manager = SettingsManager()
+        self.source_dir = ""   # 버그1: 미초기화 방지
+        self.worker = None     # 버그1: 미초기화 방지
+        self.start_time = 0.0  # 버그1: 미초기화 방지
         self.init_ui()
 
     def update_preset_list(self):
@@ -269,24 +302,28 @@ class ImageClassifierApp(QMainWindow):
         s = self.settings_manager.get_settings_for_ui()
         self.source_dir = s[0]; self.dir_path_label.setText(s[0] or "디렉토리가 선택되지 않았습니다")
         self.rename_check.setChecked(s[1]); self.handle_others_check.setChecked(s[2])
-        self.resolve_conflicts_check.setChecked(s[3]); self.safe_mode_check.setChecked(s[11])
-        self.clone_mode_check.setChecked(s[12])
+        self.resolve_conflicts_check.setChecked(s[3])
         self.multicore_check.setChecked(s[4]); self.core_count_spinbox.setValue(s[5])
         self._toggle_multicore_input(s[4])
-        self.full_tracking_check.setChecked(s[7]); self.full_tracking_prompt_input.setText(s[8])
+        self.full_tracking_check.setChecked(s[7])
+        self.full_tracking_prompt_input.setText(s[8])
+        self.full_tracking_exclude_input.setText(s[9])
         self._toggle_full_tracking_input(s[7])
-        self.custom_dest_check.setChecked(s[9]); self.custom_dest_path_input.setText(s[10])
-        self._toggle_custom_dest_input(s[9])
-        for i, (chk, inp) in enumerate(self.prompt_inputs):
-            if i < len(s[6]): chk.setChecked(s[6][i][0]); inp.setText(s[6][i][1])
+        self.custom_dest_check.setChecked(s[10]); self.custom_dest_path_input.setText(s[11])
+        self._toggle_custom_dest_input(s[10])
+        self.safe_mode_check.setChecked(s[12]); self.clone_mode_check.setChecked(s[13])
+        for i, (chk, inp, exc) in enumerate(self.prompt_inputs):
+            if i < len(s[6]):
+                chk.setChecked(s[6][i][0]); inp.setText(s[6][i][1]); exc.setText(s[6][i][2])
         self.update_preset_list()
 
     def save_current_settings(self):
-        pl = [(c.isChecked(), i.text()) for c, i in self.prompt_inputs]
+        pl = [(c.isChecked(), i.text(), e.text()) for c, i, e in self.prompt_inputs]
         s = self.settings_manager.create_settings_from_ui(
             self.source_dir, self.rename_check.isChecked(), self.handle_others_check.isChecked(),
             self.resolve_conflicts_check.isChecked(), self.multicore_check.isChecked(), self.core_count_spinbox.value(),
             pl, self.full_tracking_check.isChecked(), self.full_tracking_prompt_input.text(),
+            self.full_tracking_exclude_input.text(),
             self.custom_dest_check.isChecked(), self.custom_dest_path_input.text(),
             self.safe_mode_check.isChecked(), self.clone_mode_check.isChecked()
         )
@@ -300,8 +337,13 @@ class ImageClassifierApp(QMainWindow):
         self.handle_others_check.setChecked(p.get("handle_others", False))
         self.resolve_conflicts_check.setChecked(p.get("resolve_conflicts", False))
         
+        # 버그2: setChecked가 toggled를 즉시 발화하므로 신호를 막고 수동으로 enable 정리
+        self.safe_mode_check.blockSignals(True)
+        self.clone_mode_check.blockSignals(True)
         self.safe_mode_check.setChecked(p.get("safe_mode_enabled", False))
         self.clone_mode_check.setChecked(p.get("clone_mode_enabled", False))
+        self.safe_mode_check.blockSignals(False)
+        self.clone_mode_check.blockSignals(False)
         self.safe_mode_check.setEnabled(not self.clone_mode_check.isChecked())
         self.clone_mode_check.setEnabled(not self.safe_mode_check.isChecked())
 
@@ -310,15 +352,20 @@ class ImageClassifierApp(QMainWindow):
         self._toggle_multicore_input(p.get("multicore_enabled", False))
         self.full_tracking_check.setChecked(p.get("full_tracking_enabled", False))
         self.full_tracking_prompt_input.setText(p.get("full_tracking_prompt", ""))
+        self.full_tracking_exclude_input.setText(p.get("full_tracking_exclude_prompt", ""))
         self._toggle_full_tracking_input(p.get("full_tracking_enabled", False))
         self.custom_dest_check.setChecked(p.get("custom_dest_enabled", False))
         self.custom_dest_path_input.setText(p.get("custom_dest_path", ""))
         self._toggle_custom_dest_input(p.get("custom_dest_enabled", False))
 
         pl = p.get("prompt_levels", [])
-        for i, (c, inp) in enumerate(self.prompt_inputs):
-            if i < len(pl): c.setChecked(pl[i].get("enabled", False)); inp.setText(pl[i].get("prompt", ""))
-            else: c.setChecked(False); inp.setText("")
+        for i, (c, inp, exc) in enumerate(self.prompt_inputs):
+            if i < len(pl):
+                c.setChecked(pl[i].get("enabled", False))
+                inp.setText(pl[i].get("prompt", ""))
+                exc.setText(pl[i].get("exclude_prompt", ""))
+            else:
+                c.setChecked(False); inp.setText(""); exc.setText("")
 
     def show_save_preset_dialog(self):
         name, ok = QInputDialog.getText(self, "저장", "프리셋 이름:")
@@ -363,7 +410,9 @@ class ImageClassifierApp(QMainWindow):
 
         fl = QHBoxLayout()
         self.full_tracking_check = QCheckBox("전체추적"); self.full_tracking_check.toggled.connect(self._toggle_full_tracking_input); fl.addWidget(self.full_tracking_check)
-        self.full_tracking_prompt_input = QLineEdit(); self.full_tracking_prompt_input.setPlaceholderText("전체추적 키워드 (| 구분)"); fl.addWidget(self.full_tracking_prompt_input, 1)
+        self.full_tracking_prompt_input = QLineEdit(); self.full_tracking_prompt_input.setPlaceholderText("포함 키워드 (| 구분)"); fl.addWidget(self.full_tracking_prompt_input, 1)
+        fl.addWidget(QLabel("제외:"))
+        self.full_tracking_exclude_input = QLineEdit(); self.full_tracking_exclude_input.setPlaceholderText("제외 키워드 (| 구분)"); fl.addWidget(self.full_tracking_exclude_input, 1)
         ml.addLayout(fl)
 
         cdl = QHBoxLayout()
@@ -373,9 +422,12 @@ class ImageClassifierApp(QMainWindow):
 
         self.prompt_inputs = []
         for i in range(5):
-            ll = QHBoxLayout(); lc = QCheckBox(f"레벨 {i+1}:"); lc.setChecked(i == 0); ll.addWidget(lc)
-            pi = QLineEdit(); pi.setPlaceholderText(f"레벨 {i+1} 프롬프트 (| 구분)"); ll.addWidget(pi, 1)
-            ml.addLayout(ll); self.prompt_inputs.append((lc, pi))
+            ll = QHBoxLayout()
+            lc = QCheckBox(f"레벨 {i+1}:"); lc.setChecked(i == 0); ll.addWidget(lc)
+            pi = QLineEdit(); pi.setPlaceholderText(f"포함 키워드 (| 구분)"); ll.addWidget(pi, 1)
+            ll.addWidget(QLabel("제외:"))
+            ei = QLineEdit(); ei.setPlaceholderText("제외 키워드 (| 구분)"); ll.addWidget(ei, 1)
+            ml.addLayout(ll); self.prompt_inputs.append((lc, pi, ei))
 
         self.progress_bar = QProgressBar(); ml.addWidget(self.progress_bar)
         self.log_text = QTextEdit(); self.log_text.setReadOnly(True); ml.addWidget(self.log_text)
@@ -401,7 +453,8 @@ class ImageClassifierApp(QMainWindow):
     def _toggle_multicore_input(self, c): self.core_count_spinbox.setEnabled(c)
     def _toggle_full_tracking_input(self, c):
         self.full_tracking_prompt_input.setEnabled(c)
-        for lc, pi in self.prompt_inputs: lc.setEnabled(not c); pi.setEnabled(not c)
+        self.full_tracking_exclude_input.setEnabled(c)
+        for lc, pi, ei in self.prompt_inputs: lc.setEnabled(not c); pi.setEnabled(not c); ei.setEnabled(not c)
     def _toggle_custom_dest_input(self, c): self.custom_dest_path_input.setEnabled(c)
     def _browse_custom_dest_directory(self):
         dp = QFileDialog.getExistingDirectory(self, "대상 선택")
@@ -413,13 +466,14 @@ class ImageClassifierApp(QMainWindow):
     def start_classification(self):
         if not self.source_dir: QMessageBox.warning(self, "경고", "디렉토리 선택 요망."); return
         self.save_current_settings(); self.start_time = time.time()
-        pl = [(c.isChecked(), i.text()) for c, i in self.prompt_inputs]
-        if not self.full_tracking_check.isChecked() and not any(e for e, _ in pl) and not self.handle_others_check.isChecked(): return
+        pl = [(c.isChecked(), i.text(), e.text()) for c, i, e in self.prompt_inputs]
+        if not self.full_tracking_check.isChecked() and not any(en for en, _, __ in pl) and not self.handle_others_check.isChecked(): return
 
         self.start_btn.setEnabled(False); self.cancel_btn.setEnabled(True); self.progress_bar.setValue(0); self.log_text.clear()
         self.worker = ImageClassifierWorker(
             self.source_dir, pl, self.rename_check.isChecked(), self.handle_others_check.isChecked(), self.resolve_conflicts_check.isChecked(),
             self.multicore_check.isChecked(), self.core_count_spinbox.value(), self.full_tracking_check.isChecked(), self.full_tracking_prompt_input.text(),
+            self.full_tracking_exclude_input.text(),
             self.custom_dest_check.isChecked(), self.custom_dest_path_input.text(), self.safe_mode_check.isChecked(), self.clone_mode_check.isChecked()
         )
         self.worker.progress_updated.connect(self.progress_bar.setValue)
@@ -429,16 +483,24 @@ class ImageClassifierApp(QMainWindow):
         self.worker.start()
 
     def show_safe_mode_popup(self, count, total_size_mb):
-        if count == 0: 
-            self.worker.finalize_safe_mode("undo")
+        if count == 0:
+            logs, count = self.worker.finalize_safe_mode("undo")
+            for log_msg in logs:
+                self.log_text.append(log_msg)
+            self.classification_completed(count)
             return
         msg = QMessageBox(self); msg.setWindowTitle("안전 모드"); msg.setText(f"복사 완료: {count}개, {total_size_mb:.2f}MB\n원본 처리?")
         d_btn = msg.addButton("원본 삭제", QMessageBox.YesRole); k_btn = msg.addButton("보존", QMessageBox.NoRole); u_btn = msg.addButton("취소(복사본 삭제)", QMessageBox.RejectRole)
         msg.exec_()
         cb = msg.clickedButton()
-        if cb == d_btn: self.worker.finalize_safe_mode("delete")
-        elif cb == k_btn: self.worker.finalize_safe_mode("keep")
-        else: self.worker.finalize_safe_mode("undo")
+        if cb == d_btn: choice = "delete"
+        elif cb == k_btn: choice = "keep"
+        else: choice = "undo"
+        # 버그6: finalize는 파일 작업만 하고 로그/완료는 여기서 처리
+        logs, count = self.worker.finalize_safe_mode(choice)
+        for log_msg in logs:
+            self.log_text.append(log_msg)
+        self.classification_completed(count)
 
     def cancel_classification(self):
         if self.worker and self.worker.isRunning(): self.worker.cancel(); self.log_text.append("취소 중..."); self.cancel_btn.setEnabled(False)
