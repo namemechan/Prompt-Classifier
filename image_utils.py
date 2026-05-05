@@ -169,6 +169,65 @@ def _extract_all_text_from_image_info(info_dict: dict) -> str:
         all_found_texts.extend(_recursive_extract_text(value))
     return "\n".join(list(dict.fromkeys(all_found_texts))).strip()
 
+def extract_prompt_blocks_from_image(image_path: str) -> List[str]:
+    blocks = []
+    try:
+        with Image.open(image_path) as img:
+            png_info = img.info
+
+            prompt_info = png_info.get("parameters", "")
+            if prompt_info and isinstance(prompt_info, str):
+                blocks.append(prompt_info.strip())
+
+            nai_dict, _ = get_naidict_from_img(img)
+            if nai_dict:
+                if isinstance(nai_dict, dict):
+                    if "prompt" in nai_dict and str(nai_dict["prompt"]).strip():
+                        blocks.append(str(nai_dict["prompt"]).strip())
+                    if "negative_prompt" in nai_dict and str(nai_dict["negative_prompt"]).strip():
+                        blocks.append(str(nai_dict["negative_prompt"]).strip())
+                elif isinstance(nai_dict, str) and nai_dict.strip():
+                    blocks.append(nai_dict.strip())
+
+            exclude_keys = {"exif", "icc_profile", "photoshop", "jpeg_rescale", "jpeg_restart_interval"}
+            for key, value in png_info.items():
+                if key in exclude_keys:
+                    continue
+                blocks.extend(text for text in _recursive_extract_text(value) if text.strip())
+
+            if img.format in ["JPEG", "WEBP"]:
+                try:
+                    exif_data = piexif.load(img.info.get("exif", b""))
+                    if exif_data and "Exif" in exif_data:
+                        user_comment = exif_data["Exif"].get(piexif.ExifIFD.UserComment)
+                        if user_comment:
+                            decoded = piexif.helper.UserComment.load(user_comment)
+                            if decoded.startswith("{"):
+                                try:
+                                    blocks.append(json.loads(decoded).get("comment", decoded).strip())
+                                except Exception:
+                                    blocks.append(decoded.strip())
+                            else:
+                                blocks.append(decoded.strip())
+                except Exception:
+                    pass
+
+            try:
+                stealth_info = read_info_from_image_stealth(img)
+                if stealth_info and stealth_info.strip():
+                    blocks.append(stealth_info.strip())
+            except Exception:
+                pass
+
+        ordered_blocks = []
+        for block in blocks:
+            normalized = block.strip()
+            if normalized:
+                ordered_blocks.append(normalized)
+        return ordered_blocks
+    except Exception:
+        return []
+
 def read_info_from_image(image_path: str) -> str:
     """[버그 수정] 단일 반환 로직을 제거하고, 찾을 수 있는 모든 텍스트를 모아서 반환"""
     extracted_texts = []

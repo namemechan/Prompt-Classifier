@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QComboBox, QInputDialog, QApplication, QMainWindow,
                             QMessageBox, QTextEdit, QSpinBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from settings_manager import SettingsManager
-from image_utils import read_info_from_image
+from image_utils import read_info_from_image, extract_prompt_blocks_from_image
 
 def sanitize_for_path(name: str) -> str:
     illegal_chars = r'<>:"/\\|?*'
@@ -20,20 +20,28 @@ def process_single_image_task(image_path, keywords, exclude_keywords=None):
     img_file = os.path.basename(image_path)
     try:
         file_size = os.path.getsize(image_path)
-        prompt_data = read_info_from_image(image_path)
-        if not prompt_data:
+        prompt_blocks = extract_prompt_blocks_from_image(image_path)
+        if not prompt_blocks:
             return {"status": "no_prompt", "path": image_path, "log": f"{img_file}: 프롬프트 데이터 없음"}
-        # 제외 키워드 검사: 하나라도 포함되면 제외
-        if exclude_keywords:
-            for ex_kw in exclude_keywords:
-                if ex_kw.lower() in prompt_data.lower():
-                    return {"status": "excluded", "path": image_path, "size": file_size,
-                            "log": f"{img_file}: 제외 키워드 [{ex_kw}] 포함 — 건너뜀"}
+
+        exclude_keywords = [kw.lower() for kw in (exclude_keywords or []) if kw]
+        keywords = [kw for kw in (keywords or []) if kw]
+
+        for block in reversed(prompt_blocks):
+            block_lower = block.lower()
+
+            if exclude_keywords:
+                for ex_kw in exclude_keywords:
+                    if ex_kw in block_lower:
+                        return {"status": "excluded", "path": image_path, "size": file_size,
+                                "log": f"{img_file}: 제외 키워드 [{ex_kw}] 포함 — 건너뜀"}
+
+            for keyword in keywords:
+                if keyword.lower() in block_lower:
+                    return {"status": "success", "path": image_path, "keyword": keyword, "size": file_size}
+
         if not keywords:
             return {"status": "no_keyword_match", "path": image_path, "size": file_size}
-        for keyword in keywords:
-            if keyword.lower() in prompt_data.lower():
-                return {"status": "success", "path": image_path, "keyword": keyword, "size": file_size}
         return {"status": "no_keyword_match", "path": image_path, "size": file_size, "log": f"{img_file}: 일치하는 키워드 없음"}
     except Exception as e:
         return {"status": "error", "path": image_path, "log": f"{img_file} 처리 중 오류: {str(e)}"}
