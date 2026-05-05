@@ -103,25 +103,73 @@ def _get_naidict_from_exifdict(exif_dict):
         return nai_dict
     except Exception: return None
 
+def _decode_utf16le(raw_bytes: bytes) -> Optional[str]:
+    """NAI WebP 전용: UTF-16 LE 고정 디코딩."""
+    try:
+        decoded = raw_bytes.decode('utf-16-le', errors='ignore').replace('\x00', '').strip()
+        idx = decoded.find('{')
+        return decoded[idx:] if idx > 0 else (decoded or None)
+    except Exception:
+        return None
+
+def _read_webp_exif_user_comment(img) -> Optional[str]:
+    """
+    WebP EXIF UserComment 읽기.
+    ComfyUI WebP(UTF-8): piexif.helper.UserComment.load()로 정상 읽힘.
+    NAI WebP(UTF-16 LE): UserComment.load()가 깨진 CJK 문자 반환 → _decode_utf16le()로 재시도.
+    CJK 문자 비율(>0x3000)로 깨진 여부를 판별한다.
+    """
+    try:
+        exif_bytes = img.info.get("exif")
+        if not exif_bytes:
+            return None
+        exif_dict = piexif.load(exif_bytes)
+        user_comment_bytes = exif_dict.get("Exif", {}).get(piexif.ExifIFD.UserComment)
+        if not user_comment_bytes:
+            return None
+
+        # 1차: piexif.helper.UserComment.load() (ComfyUI WebP UTF-8 대응)
+        try:
+            candidate = piexif.helper.UserComment.load(user_comment_bytes).replace('\x00', '').strip()
+            cjk_ratio = sum(1 for c in candidate if ord(c) > 0x3000) / max(len(candidate), 1)
+            if candidate and cjk_ratio < 0.1:
+                return candidate
+        except Exception:
+            pass
+
+        # 2차: UTF-16 LE 고정 디코딩 (NAI WebP 대응)
+        return _decode_utf16le(user_comment_bytes)
+    except Exception:
+        return None
+
 def _get_infostr_from_img(img):
     exif_str, pnginfo_str = None, None
-    if img.format in ["WEBP", "JPEG"]:
+
+    if img.format == "WEBP":
+        exif_str = _read_webp_exif_user_comment(img)
+    elif img.format == "JPEG":
         try:
             exif_bytes = img.info.get("exif")
             if exif_bytes:
                 exif_dict = piexif.load(exif_bytes)
                 user_comment_bytes = exif_dict.get("Exif", {}).get(piexif.ExifIFD.UserComment)
-                if user_comment_bytes: exif_str = piexif.helper.UserComment.load(user_comment_bytes)
-        except: pass
+                if user_comment_bytes:
+                    exif_str = piexif.helper.UserComment.load(user_comment_bytes).replace('\x00', '').strip() or None
+        except Exception:
+            pass
 
+    # PNG 또는 WebP/JPEG에서 EXIF로 못 읽은 경우 img.info 직접 확인
     if exif_str is None and img.info:
         if 'Comment' in img.info and isinstance(img.info['Comment'], str):
             exif_str = img.info['Comment']
         elif 'parameters' in img.info and isinstance(img.info['parameters'], str):
             exif_str = img.info['parameters']
 
-    try: pnginfo_str = read_info_from_image_stealth(img)
-    except: pass
+    try:
+        pnginfo_str = read_info_from_image_stealth(img)
+    except Exception:
+        pass
+
     return exif_str, pnginfo_str
 
 def get_naidict_from_img(img):
@@ -201,7 +249,10 @@ def extract_prompt_blocks_from_image(image_path: str) -> List[str]:
                     if exif_data and "Exif" in exif_data:
                         user_comment = exif_data["Exif"].get(piexif.ExifIFD.UserComment)
                         if user_comment:
-                            decoded = piexif.helper.UserComment.load(user_comment)
+                            if img.format == "WEBP":
+                                decoded = _read_webp_exif_user_comment(img) or ""
+                            else:
+                                decoded = piexif.helper.UserComment.load(user_comment)
                             if decoded.startswith("{"):
                                 try:
                                     blocks.append(json.loads(decoded).get("comment", decoded).strip())
@@ -261,7 +312,10 @@ def read_info_from_image(image_path: str) -> str:
                     if exif_data and "Exif" in exif_data:
                         user_comment = exif_data["Exif"].get(piexif.ExifIFD.UserComment)
                         if user_comment:
-                            decoded = piexif.helper.UserComment.load(user_comment)
+                            if img.format == "WEBP":
+                                decoded = _read_webp_exif_user_comment(img) or ""
+                            else:
+                                decoded = piexif.helper.UserComment.load(user_comment)
                             if decoded.startswith("{"):
                                 try: extracted_texts.append(json.loads(decoded).get("comment", decoded))
                                 except: extracted_texts.append(decoded)
