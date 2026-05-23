@@ -270,10 +270,12 @@ def extract_prompt_blocks_from_image(image_path: str) -> List[str]:
             except Exception:
                 pass
 
+        seen = set()
         ordered_blocks = []
         for block in blocks:
             normalized = block.strip()
-            if normalized:
+            if normalized and normalized not in seen:
+                seen.add(normalized)
                 ordered_blocks.append(normalized)
         return ordered_blocks
     except Exception:
