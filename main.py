@@ -33,6 +33,59 @@ def sanitize_for_path(name: str) -> str:
     return name[:100]
 
 
+
+
+# ──────────────────────────────────────────────────────────────────
+#  와일드카드 처리
+# ──────────────────────────────────────────────────────────────────
+def get_wildcard_base_dir() -> str:
+    """main.py 또는 패키징된 exe 기준의 wildcard 폴더 경로를 반환."""
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "wildcard")
+
+
+def expand_wildcards(raw_text, enabled, _visited=None):
+    """
+    키워드 문자열을 파싱하여 최종 키워드 목록을 반환.
+    - enabled=False : | 로만 분리, __태그__를 일반 키워드로 취급
+    - enabled=True  : __태그__ 발견 시 wildcard/<태그>.txt 읽어 재귀 확장
+    """
+    if _visited is None:
+        _visited = set()
+
+    result = []
+    parts = [p.strip() for p in raw_text.split('|') if p.strip()]
+
+    if not enabled:
+        return parts
+
+    wildcard_dir = get_wildcard_base_dir()
+
+    for part in parts:
+        if part.startswith('__') and part.endswith('__') and len(part) > 4:
+            tag = part[2:-2]
+            if tag in _visited:
+                result.append(part)
+                continue
+            txt_path = os.path.join(wildcard_dir, tag + '.txt')
+            if not os.path.isfile(txt_path):
+                continue
+            try:
+                with open(txt_path, 'r', encoding='utf-8') as f:
+                    lines = f.read().splitlines()
+                merged = '|'.join(line.strip() for line in lines if line.strip())
+                result.extend(expand_wildcards(merged, True, _visited | {tag}))
+            except (IOError, OSError):
+                continue
+        else:
+            result.append(part)
+
+    return result
+
+
 def get_image_size(image_path: str):
     """(width, height) 반환. 실패 시 None."""
     try:
@@ -54,18 +107,18 @@ def process_single_image_task(image_path, keywords, exclude_keywords=None):
             return {"status": "no_prompt", "path": image_path,
                     "log": f"{img_file}: 프롬프트 데이터 없음"}
 
-        exclude_keywords = [kw.lower() for kw in (exclude_keywords or []) if kw]
+        exclude_keywords = [kw.replace('\\\\', '\\').lower() for kw in (exclude_keywords or []) if kw]
         keywords = [kw for kw in (keywords or []) if kw]
 
         for block in reversed(prompt_blocks):
-            block_lower = block.lower()
+            block_lower = block.replace('\\\\', '\\').lower()
             if exclude_keywords:
                 for ex_kw in exclude_keywords:
                     if ex_kw in block_lower:
                         return {"status": "excluded", "path": image_path, "size": file_size,
                                 "log": f"{img_file}: 제외 키워드 [{ex_kw}] 포함 — 건너뜀"}
             for keyword in keywords:
-                if keyword.lower() in block_lower:
+                if keyword.replace('\\\\', '\\').lower() in block_lower:
                     return {"status": "success", "path": image_path,
                             "keyword": keyword, "size": file_size}
 
@@ -93,6 +146,7 @@ class ImageClassifierWorker(QThread):
                  full_tracking_enabled=False, full_tracking_prompt="", full_tracking_exclude_prompt="",
                  custom_dest_enabled=False, custom_dest_path="",
                  safe_mode_enabled=False, clone_mode_enabled=False,
+                 wildcard_enabled=False,
                  res_cfg: dict = None):
         super().__init__()
         self.source_dir                   = source_dir
@@ -111,6 +165,7 @@ class ImageClassifierWorker(QThread):
         self.custom_dest_path             = custom_dest_path
         self.safe_mode_enabled            = safe_mode_enabled
         self.clone_mode_enabled           = clone_mode_enabled
+        self.wildcard_enabled             = wildcard_enabled
         self.res_cfg                      = res_cfg or {}
         self.canceled                     = False
         self.undo_info                    = []
@@ -168,8 +223,8 @@ class ImageClassifierWorker(QThread):
             images = self._find_all_image_files_recursive(self.source_dir)
             if not images:
                 return
-            keywords = [p.strip() for p in self.full_tracking_prompt.split('|') if p.strip()]
-            exc_kws  = [p.strip() for p in self.full_tracking_exclude_prompt.split('|') if p.strip()]
+            keywords = expand_wildcards(self.full_tracking_prompt, self.wildcard_enabled)
+            exc_kws  = expand_wildcards(self.full_tracking_exclude_prompt, self.wildcard_enabled)
             self._process_images_by_keywords(images, keywords, op,
                                              handle_others_flag=(self.handle_others != "off"),
                                              exclude_keywords=exc_kws)
@@ -186,8 +241,8 @@ class ImageClassifierWorker(QThread):
                 self.log_updated.emit(f"레벨 {level_idx+1} 처리 중...")
                 level_images = self._collect_level_images(current_dirs)
                 if not level_images: break
-                keywords = [p.strip() for p in prompt_string.split('|') if p.strip()]
-                exc_kws  = [p.strip() for p in exclude_string.split('|') if p.strip()]
+                keywords = expand_wildcards(prompt_string, self.wildcard_enabled)
+                exc_kws  = expand_wildcards(exclude_string, self.wildcard_enabled)
                 next_dirs = self._process_images_by_keywords(level_images, keywords, op,
                                                               handle_others_flag=False,
                                                               exclude_keywords=exc_kws)
@@ -607,6 +662,14 @@ class ImageClassifierApp(QMainWindow):
         self.rename_custom_input.setEnabled(False)
         self.rename_custom_input.setMaximumWidth(180)
         nl.addWidget(self.rename_custom_input)
+        sep_wc = QFrame(); sep_wc.setFrameShape(QFrame.VLine); sep_wc.setFrameShadow(QFrame.Sunken)
+        nl.addWidget(sep_wc)
+        self.wildcard_check = QCheckBox("와일드카드 처리")
+        self.wildcard_check.setToolTip(
+            "키워드 입력란에서 __파일명__ 형식으로 외부 txt 파일의 키워드를 불러옵니다.\n"
+            "wildcard 폴더는 exe(또는 main.py)와 같은 위치에 있어야 합니다."
+        )
+        nl.addWidget(self.wildcard_check)
         nl.addStretch()
         ml.addLayout(nl)
 
@@ -952,6 +1015,7 @@ class ImageClassifierApp(QMainWindow):
             self.full_tracking_exclude_input.text(),
             self.custom_dest_check.isChecked(), self.custom_dest_path_input.text(),
             self.safe_mode_check.isChecked(), self.clone_mode_check.isChecked(),
+            self.wildcard_check.isChecked(),
             res["res_enabled"], res["res_standalone"], res["res_timing"], res["res_folder_format"],
             res["res_group_by_ratio"], res["res_ignore_orientation"],
             res["res_tolerance_enabled"], res["res_tolerance_mode"], res["res_tolerance_value"],
@@ -986,10 +1050,11 @@ class ImageClassifierApp(QMainWindow):
         self.custom_dest_check.setChecked(s[11]); self.custom_dest_path_input.setText(s[12])
         self._toggle_custom_dest_input(s[11])
         self.safe_mode_check.setChecked(s[13]); self.clone_mode_check.setChecked(s[14])
+        self.wildcard_check.setChecked(s[15])
         for i, (chk, inp, exc) in enumerate(self.prompt_inputs):
             if i < len(s[7]):
                 chk.setChecked(s[7][i][0]); inp.setText(s[7][i][1]); exc.setText(s[7][i][2])
-        # 해상도 설정 (s[15]~)
+        # 해상도 설정 (s[16]~)
         cfg_keys = [
             "res_enabled", "res_standalone", "res_timing", "res_folder_format",
             "res_group_by_ratio", "res_ignore_orientation",
@@ -998,7 +1063,7 @@ class ImageClassifierApp(QMainWindow):
             "res_cutoff_enabled", "res_cutoff_min", "res_cutoff_max",
             "res_whitelist_enabled", "res_blacklist_enabled", "res_whitelist", "res_blacklist",
         ]
-        res_cfg = {k: s[15 + i] for i, k in enumerate(cfg_keys)}
+        res_cfg = {k: s[16 + i] for i, k in enumerate(cfg_keys)}
         self._apply_res_cfg(res_cfg)
         self.update_preset_list()
 
@@ -1038,6 +1103,8 @@ class ImageClassifierApp(QMainWindow):
         self.safe_mode_check.blockSignals(False); self.clone_mode_check.blockSignals(False)
         self.safe_mode_check.setEnabled(not self.clone_mode_check.isChecked())
         self.clone_mode_check.setEnabled(not self.safe_mode_check.isChecked())
+
+        self.wildcard_check.setChecked(p.get("wildcard_enabled", False))
 
         self.multicore_check.setChecked(p.get("multicore_enabled", False))
         self.core_count_spinbox.setValue(p.get("multicore_core_count", os.cpu_count() or 4))
@@ -1121,6 +1188,7 @@ class ImageClassifierApp(QMainWindow):
             self.full_tracking_exclude_input.text(),
             self.custom_dest_check.isChecked(), self.custom_dest_path_input.text(),
             self.safe_mode_check.isChecked(), self.clone_mode_check.isChecked(),
+            self.wildcard_check.isChecked(),
             res_cfg=res_cfg,
         )
         self.worker.progress_updated.connect(self.progress_bar.setValue)

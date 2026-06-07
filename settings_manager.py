@@ -52,6 +52,7 @@ class SettingsManager:
             "custom_dest_path": "",
             "safe_mode_enabled": False,
             "clone_mode_enabled": False,
+            "wildcard_enabled": False,
             # ── 해상도 분류 ──────────────────────────────────────────
             "res_enabled": False,
             "res_standalone": False,        # True 이면 프롬프트 분류 없이 해상도만 실행
@@ -106,6 +107,7 @@ class SettingsManager:
 
         for key in ("rename_images", "resolve_conflicts", "multicore_enabled",
                     "full_tracking_enabled", "custom_dest_enabled", "safe_mode_enabled", "clone_mode_enabled",
+                    "wildcard_enabled",
                     "res_enabled", "res_standalone", "res_group_by_ratio", "res_ignore_orientation",
                     "res_tolerance_enabled", "res_min_count_enabled", "res_cutoff_enabled",
                     "res_whitelist_enabled", "res_blacklist_enabled"):
@@ -229,8 +231,9 @@ class SettingsManager:
             s.get("custom_dest_path", ""),          # 12 ← 구:11
             s.get("safe_mode_enabled", False),      # 13 ← 구:12
             s.get("clone_mode_enabled", False),     # 14 ← 구:13
+            s.get("wildcard_enabled", False),        # 15 ← 신규
             # 해상도 분류
-            s.get("res_enabled", False),            # 15 ← 구:14
+            s.get("res_enabled", False),            # 16
             s.get("res_standalone", False),         # 16 ← 신규
             s.get("res_timing", "after"),           # 17 ← 구:15
             s.get("res_folder_format", "wh"),       # 18 ← 구:16
@@ -255,6 +258,7 @@ class SettingsManager:
                                 multicore_enabled, multicore_core_count, prompt_levels,
                                 full_tracking_enabled, full_tracking_prompt, full_tracking_exclude_prompt,
                                 custom_dest_enabled, custom_dest_path, safe_mode_enabled, clone_mode_enabled,
+                                wildcard_enabled,
                                 res_enabled, res_standalone, res_timing, res_folder_format, res_group_by_ratio,
                                 res_ignore_orientation, res_tolerance_enabled, res_tolerance_mode,
                                 res_tolerance_value, res_min_count_enabled, res_min_count,
@@ -285,6 +289,7 @@ class SettingsManager:
             "custom_dest_path": custom_dest_path or "",
             "safe_mode_enabled": bool(safe_mode_enabled),
             "clone_mode_enabled": bool(clone_mode_enabled),
+            "wildcard_enabled": bool(wildcard_enabled),
             "res_enabled": bool(res_enabled),
             "res_standalone": bool(res_standalone),
             "res_timing": res_timing or "after",
